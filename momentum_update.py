@@ -157,6 +157,56 @@ def compute_signals(raw: dict[str, pd.DataFrame], lookback_days: int,
     return build(breakouts_mask), build(near_mask)
 
 
+def _format_market_cap(mc) -> str:
+    if mc is None or (isinstance(mc, float) and pd.isna(mc)):
+        return ""
+    try:
+        mc = float(mc)
+    except (TypeError, ValueError):
+        return ""
+    if mc >= 1e12:
+        return f"{mc / 1e12:.2f}T"
+    if mc >= 1e9:
+        return f"{mc / 1e9:.2f}B"
+    if mc >= 1e6:
+        return f"{mc / 1e6:.0f}M"
+    return f"{mc:,.0f}"
+
+
+def enrich_with_metadata(df: pd.DataFrame, max_workers: int = 10) -> pd.DataFrame:
+    """Add 'Sector' and 'Market Cap' columns by querying yfinance Ticker.info per symbol.
+
+    Hits Yahoo's quoteSummary endpoint once per ticker, parallelized with threads.
+    Silent fallback to "" for missing/flaky metadata responses.
+    """
+    if df.empty:
+        df = df.copy()
+        df["Sector"] = pd.Series(dtype=object)
+        df["Market Cap"] = pd.Series(dtype=object)
+        return df
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch(sym):
+        try:
+            info = yf.Ticker(sym).info or {}
+            return sym, info.get("sector") or "", info.get("marketCap")
+        except Exception:
+            return sym, "", None
+
+    symbols = df.index.tolist()
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        results = list(tqdm(ex.map(fetch, symbols), total=len(symbols), desc="Fetching metadata"))
+
+    sectors = {s: sec for s, sec, _ in results}
+    mcaps = {s: _format_market_cap(mc) for s, _, mc in results}
+
+    out = df.copy()
+    out.insert(0, "Sector", out.index.map(sectors))
+    out.insert(1, "Market Cap", out.index.map(mcaps))
+    return out
+
+
 def slugify(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
 
@@ -256,11 +306,22 @@ def print_summary(universe_name: str, breakouts: pd.DataFrame, near: pd.DataFram
     else:
         print()
 
-    cols = ["Price", "Distance to High (%)", "Volume Ratio"]
+    desired = ["Sector", "Market Cap", "Price", "Distance to High (%)", "Volume Ratio"]
+
+    def _fmt(df):
+        if df.empty:
+            return "  none"
+        cols = [c for c in desired if c in df.columns]
+        out = df[cols].copy()
+        for c in ("Price", "Distance to High (%)", "Volume Ratio"):
+            if c in out.columns:
+                out[c] = out[c].round(2)
+        return out.to_string()
+
     print("Breakouts:")
-    print("  none" if breakouts.empty else breakouts[cols].round(2).to_string())
+    print(_fmt(breakouts))
     print("\nNear breakouts:")
-    print("  none" if near.empty else near[cols].round(2).to_string())
+    print(_fmt(near))
 
 
 def parse_args() -> argparse.Namespace:
@@ -282,6 +343,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sleep", type=float, default=2.0, help="Seconds to sleep between batches (default: 2)")
     p.add_argument("--output-dir", type=Path, default=Path("outputs"), help="Output directory (default: ./outputs)")
     p.add_argument("--no-xlsx", action="store_true", help="Skip writing local .xlsx (useful in CI)")
+    p.add_argument("--no-metadata", action="store_true",
+                   help="Skip Sector/Market Cap enrichment (faster, but less context in output)")
     p.add_argument("--sheet-id", default=None,
                    help="Google Sheet ID to write results to. Sheet ID is the long string in the Sheet URL.")
     p.add_argument("--sa-json", default=None,
@@ -320,6 +383,10 @@ def main() -> int:
     breakouts, near = compute_signals(
         raw, args.lookback_days, args.soft_breakout, args.proximity, args.volume_threshold,
     )
+
+    if not args.no_metadata:
+        breakouts = enrich_with_metadata(breakouts)
+        near = enrich_with_metadata(near)
 
     out_path = None
     if not args.no_xlsx:
