@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+outputs/
+*.xlsx
+
+# Never commit Google service-account keys
+service-account*.json
+*-credentials.json
+.env

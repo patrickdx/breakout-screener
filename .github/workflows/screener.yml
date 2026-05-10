@@ -1,0 +1,31 @@
+name: Daily Breakout Screener
+
+on:
+  schedule:
+    # 22:00 UTC weekdays = ~5pm ET (after US market close, regardless of DST)
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch: {}  # allow manual run from the Actions tab
+
+jobs:
+  run-screener:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Nasdaq breakout screener
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          python momentum_update.py \
+            --nasdaq \
+            --no-xlsx \
+            --sheet-id "${{ secrets.SHEET_ID }}"
