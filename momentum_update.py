@@ -28,6 +28,7 @@ GOOGLE_SCOPES = [
 
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
+HANGSENG_URL = "https://en.wikipedia.org/wiki/Hang_Seng_Index"
 TICKER_COL_CANDIDATES = ("Symbol", "Ticker", "Ticker Symbol")
 
 
@@ -76,6 +77,23 @@ def load_nasdaq(include_etfs: bool = False, include_non_common: bool = False) ->
     return df["Symbol"].tolist()
 
 
+def load_hangseng() -> list[str]:
+    """Fetch current Hang Seng Index constituents from Wikipedia.
+
+    Wikipedia formats tickers as 'SEHK: XXXX'. We extract the numeric code,
+    zero-pad to 4 digits, and append the '.HK' suffix that yfinance requires.
+    """
+    req = urllib.request.Request(HANGSENG_URL, headers={"User-Agent": "Mozilla/5.0"})
+    html = urllib.request.urlopen(req).read().decode("utf-8")
+    tables = pd.read_html(StringIO(html))
+    constituents = next(
+        t for t in tables
+        if "Ticker" in t.columns and t["Ticker"].astype(str).str.contains("SEHK", na=False).any()
+    )
+    codes = constituents["Ticker"].astype(str).str.extract(r"SEHK:?\s*(\d+)", expand=False).dropna()
+    return [f"{int(c):04d}.HK" for c in codes]
+
+
 def load_csv(path: Path) -> list[str]:
     df = pd.read_csv(path)
     col = next((c for c in TICKER_COL_CANDIDATES if c in df.columns), None)
@@ -87,8 +105,9 @@ def load_csv(path: Path) -> list[str]:
 
 
 def normalize_tickers(tickers: list[str]) -> list[str]:
-    # yfinance uses '-' instead of '.' for class shares (BRK.B -> BRK-B)
-    return [t.replace(".", "-") for t in tickers]
+    # yfinance uses '-' instead of '.' for US class shares (BRK.B -> BRK-B),
+    # but preserves the '.HK' exchange suffix on Hong Kong tickers (0700.HK).
+    return [t if t.endswith(".HK") else t.replace(".", "-") for t in tickers]
 
 
 def download_batch_with_retry(tickers, start, end, retries=3, sleep_time=2):
@@ -243,7 +262,8 @@ def _load_service_account_creds(sa_json_path: str | None):
 
 def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
                           breakouts: pd.DataFrame, near: pd.DataFrame,
-                          sa_json_path: str | None = None) -> str:
+                          sa_json_path: str | None = None,
+                          tab_prefix: str = "") -> str:
     import gspread
 
     creds = _load_service_account_creds(sa_json_path)
@@ -282,9 +302,9 @@ def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
         rows = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
         ws.update(rows)
 
-    write_df(get_or_create_ws("Summary", 10, 2), summary)
-    write_df(get_or_create_ws("Breakouts", len(breakouts_out) + 1, 5), breakouts_out)
-    write_df(get_or_create_ws("Near Breakouts", len(near_out) + 1, 5), near_out)
+    write_df(get_or_create_ws(f"{tab_prefix}Summary", 10, 2), summary)
+    write_df(get_or_create_ws(f"{tab_prefix}Breakouts", len(breakouts_out) + 1, 5), breakouts_out)
+    write_df(get_or_create_ws(f"{tab_prefix}Near Breakouts", len(near_out) + 1, 5), near_out)
 
     # Drop the auto-created empty default tab if present
     try:
@@ -329,6 +349,7 @@ def parse_args() -> argparse.Namespace:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--spy", action="store_true", help="Use S&P 500 (scraped from Wikipedia)")
     src.add_argument("--nasdaq", action="store_true", help="Use all Nasdaq-listed common stock (~5k tickers)")
+    src.add_argument("--hangseng", action="store_true", help="Use Hang Seng Index constituents (~88 HK blue chips)")
     src.add_argument("--csv", type=Path, help="Path to CSV with a ticker column")
 
     p.add_argument("--include-etfs", action="store_true", help="With --nasdaq, include ETFs (default: excluded)")
@@ -362,6 +383,9 @@ def main() -> int:
     elif args.nasdaq:
         universe_name = args.name or "NASDAQ"
         tickers = load_nasdaq(include_etfs=args.include_etfs, include_non_common=args.include_non_common)
+    elif args.hangseng:
+        universe_name = args.name or "HANGSENG"
+        tickers = load_hangseng()
     else:
         universe_name = args.name or args.csv.stem
         tickers = load_csv(args.csv)
@@ -394,9 +418,11 @@ def main() -> int:
     print_summary(universe_name, breakouts, near, out_path)
 
     if args.sheet_id:
+        tab_prefix = "HK " if args.hangseng else ""
         url = write_to_google_sheet(
             sheet_id=args.sheet_id, universe_name=universe_name, n_screened=len(raw),
             breakouts=breakouts, near=near, sa_json_path=args.sa_json,
+            tab_prefix=tab_prefix,
         )
         print(f"\nWrote results to Google Sheet: {url}")
     return 0
