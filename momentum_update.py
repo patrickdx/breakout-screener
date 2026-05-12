@@ -148,11 +148,12 @@ def compute_signals(raw: dict[str, pd.DataFrame], lookback_days: int,
     data = pd.concat(raw, axis=1)
 
     close = pd.DataFrame({t: data[t]["Close"] for t in tickers})
-    high = pd.DataFrame({t: data[t]["High"] for t in tickers})
     volume = {t: data[(t, "Volume")] for t in tickers}
     avg_vol_50 = {t: v.rolling(50).mean() for t, v in volume.items()}
 
-    rolling_high = high.rolling(lookback_days, min_periods=1).max()
+    # Rolling highest CLOSE (not intraday high): ignores stale single-bar wicks
+    # and flags every new closing high as a breakout candidate.
+    rolling_high = close.rolling(lookback_days, min_periods=1).max()
 
     current_close = close.iloc[-1]
     rolling_high_today = rolling_high.iloc[-1]
