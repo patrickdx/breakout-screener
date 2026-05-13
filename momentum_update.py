@@ -337,8 +337,12 @@ def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
 
     def _df_with_symbol(df):
         out = df.reset_index().rename(columns={df.index.name or "index": "Symbol"})
+        # Drop columns the Sheet computes live via GOOGLEFINANCE so users can
+        # add their own formulas (price, marketcap, AI()) without our writes
+        # clobbering them.
+        out = out.drop(columns=[c for c in ("Price", "Market Cap") if c in out.columns])
         # Round numerics for cleaner Sheet display
-        for c in ("Price", "52-Week High", "Volume Ratio", "Day Change (%)"):
+        for c in ("52-Week High", "Volume Ratio", "Day Change (%)"):
             if c in out.columns:
                 out[c] = out[c].round(2)
         # Wrap each ticker in a HYPERLINK to its Google Finance page.
@@ -351,20 +355,33 @@ def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
     near_out = _df_with_symbol(near)
 
     def get_or_create_ws(title, rows, cols):
+        # No ws.clear() — write_df handles range-bound updates so user
+        # formulas and formatting in adjacent columns are preserved.
         try:
-            ws = sh.worksheet(title)
-            ws.clear()
-            return ws
+            return sh.worksheet(title)
         except gspread.WorksheetNotFound:
             return sh.add_worksheet(title=title, rows=str(max(rows, 100)), cols=str(max(cols, 10)))
 
     def write_df(ws, df):
+        # Read column A's current length so we know how many trailing rows
+        # used to have data; we'll blank those (in our column range only)
+        # after writing fresh data, leaving user columns to the right intact.
+        prev_rows = len(ws.col_values(1))
+
         if df.empty:
-            ws.update([["(none)"]])
-            return
-        rows = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
+            rows = [["(none)"]]
+        else:
+            rows = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
+
+        n_rows = len(rows)
+        n_cols = len(rows[0])
+        last_col = chr(ord("A") + n_cols - 1)
         # USER_ENTERED so the HYPERLINK() formulas in the Symbol column render as links.
-        ws.update(rows, value_input_option="USER_ENTERED")
+        ws.update(values=rows, range_name=f"A1:{last_col}{n_rows}",
+                  value_input_option="USER_ENTERED")
+
+        if prev_rows > n_rows:
+            ws.batch_clear([f"A{n_rows + 1}:{last_col}{prev_rows}"])
 
     write_df(get_or_create_ws(f"{tab_prefix}Summary", 10, 2), summary)
     write_df(get_or_create_ws(f"{tab_prefix}Breakouts", len(breakouts_out) + 1, 5), breakouts_out)
