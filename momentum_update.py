@@ -245,11 +245,6 @@ def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
             return sh.add_worksheet(title=title, rows=str(max(rows, 100)), cols=str(max(cols, 10)))
 
     def write_df(ws, df):
-        # Read column A's current length so we know how many trailing rows
-        # used to have data; we'll blank those (in our column range only)
-        # after writing fresh data, leaving user columns to the right intact.
-        prev_rows = len(ws.col_values(1))
-
         if df.empty:
             rows = [["(none)"]]
         else:
@@ -258,12 +253,13 @@ def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
         n_rows = len(rows)
         n_cols = len(rows[0])
         last_col = chr(ord("A") + n_cols - 1)
-        # USER_ENTERED so the HYPERLINK() formulas in the Symbol column render as links.
+        # Wipe the entire script-owned column range (values only, not formatting)
+        # before writing fresh data — guarantees no stale residue from a prior
+        # run that had more rows or wrote to cells we no longer touch. Columns
+        # beyond `last_col` are user-owned and never touched.
+        ws.batch_clear([f"A:{last_col}"])
         ws.update(values=rows, range_name=f"A1:{last_col}{n_rows}",
                   value_input_option="USER_ENTERED")
-
-        if prev_rows > n_rows:
-            ws.batch_clear([f"A{n_rows + 1}:{last_col}{prev_rows}"])
 
     write_df(get_or_create_ws(f"{tab_prefix}Summary", 10, 2), summary)
     write_df(get_or_create_ws(f"{tab_prefix}Breakouts", len(breakouts_out) + 1, 5), breakouts_out)
