@@ -1,5 +1,4 @@
 yfinance
-curl_cffi
 pandas
 tqdm
 openpyxl

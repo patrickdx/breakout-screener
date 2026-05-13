@@ -156,131 +156,24 @@ def compute_signals(raw: dict[str, pd.DataFrame], lookback_days: int,
     rolling_high = close.rolling(lookback_days, min_periods=1).max()
 
     current_close = close.iloc[-1]
-    prev_close = close.iloc[-2]
     rolling_high_today = rolling_high.iloc[-1]
     latest_volume = pd.Series({t: v.iloc[-1] for t, v in volume.items()})
     latest_avg_volume = pd.Series({t: a.iloc[-1] for t, a in avg_vol_50.items()})
 
     volume_ratio = latest_volume / latest_avg_volume
     proximity = (rolling_high_today - current_close) / rolling_high_today
-    day_change = (current_close - prev_close) / prev_close * 100
 
     breakouts_mask = (proximity <= soft_breakout_pct) & (volume_ratio > volume_threshold)
     near_mask = (proximity <= proximity_threshold) & (~breakouts_mask) & (rolling_high_today > 0)
 
     def build(mask):
         return pd.DataFrame({
-            "Price": current_close[mask],
-            "Day Change (%)": day_change[mask].round(2),
             "52-Week High": rolling_high_today[mask],
             "Distance to High (%)": (proximity[mask] * 100).round(2),
             "Volume Ratio": volume_ratio[mask],
         }).dropna().sort_values(by="Distance to High (%)")
 
     return build(breakouts_mask), build(near_mask)
-
-
-def _format_market_cap(mc) -> str:
-    if mc is None or (isinstance(mc, float) and pd.isna(mc)):
-        return ""
-    try:
-        mc = float(mc)
-    except (TypeError, ValueError):
-        return ""
-    if mc >= 1e12:
-        return f"{mc / 1e12:.2f}T"
-    if mc >= 1e9:
-        return f"{mc / 1e9:.2f}B"
-    if mc >= 1e6:
-        return f"{mc / 1e6:.0f}M"
-    return f"{mc:,.0f}"
-
-
-def enrich_with_metadata(df: pd.DataFrame, max_workers: int = 10) -> tuple[pd.DataFrame, dict[str, str]]:
-    """Add 'Sector' and 'Market Cap' columns by querying yfinance Ticker.info per symbol.
-
-    Hits Yahoo's quoteSummary endpoint once per ticker, parallelized with threads.
-    Silent fallback to "" for missing/flaky metadata responses.
-
-    Returns the enriched DataFrame and a {symbol: yfinance exchange code} dict
-    (used downstream to build Google Finance hyperlinks).
-    """
-    if df.empty:
-        df = df.copy()
-        df["Sector"] = pd.Series(dtype=object)
-        df["Market Cap"] = pd.Series(dtype=object)
-        return df, {}
-
-    from concurrent.futures import ThreadPoolExecutor
-    from curl_cffi import requests as curl_requests
-
-    # Browser-impersonating session bypasses Yahoo's bot-detection on cloud
-    # IPs (e.g. GitHub Actions runners), which otherwise returns empty .info.
-    session = curl_requests.Session(impersonate="chrome")
-
-    symbols = df.index.tolist()
-
-    # Pre-warm sequentially: Yahoo's first quoteSummary call from a cold session
-    # often hits 401 Invalid Crumb. Letting one call go first lets yfinance's
-    # internal retry establish a valid crumb cookie before N workers race for it.
-    try:
-        yf.Ticker(symbols[0], session=session).info
-    except Exception:
-        pass
-
-    def fetch(sym):
-        for attempt in range(2):
-            try:
-                info = yf.Ticker(sym, session=session).info or {}
-                sector = info.get("sector") or ""
-                mc = info.get("marketCap")
-                exc = info.get("exchange") or ""
-                if sector or mc is not None or exc:
-                    return sym, sector, mc, exc
-            except Exception:
-                pass
-        return sym, "", None, ""
-
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        results = list(tqdm(ex.map(fetch, symbols), total=len(symbols), desc="Fetching metadata"))
-
-    missing = sum(1 for _, sec, mc, _ in results if not sec and mc is None)
-    if missing:
-        print(f"[enrich_with_metadata] {missing}/{len(results)} symbols returned no metadata", file=sys.stderr)
-
-    sectors = {s: sec for s, sec, _, _ in results}
-    mcaps = {s: _format_market_cap(mc) for s, _, mc, _ in results}
-    exchanges = {s: exc for s, _, _, exc in results}
-
-    out = df.copy()
-    out.insert(0, "Sector", out.index.map(sectors))
-    out.insert(1, "Market Cap", out.index.map(mcaps))
-    return out, exchanges
-
-
-# Yahoo Finance "exchange" code → Google Finance exchange suffix
-YF_TO_GOOGLE_EXCHANGE = {
-    "NMS": "NASDAQ",   # Nasdaq Global Select
-    "NGM": "NASDAQ",   # Nasdaq Global Market
-    "NCM": "NASDAQ",   # Nasdaq Capital Market
-    "NYQ": "NYSE",
-    "ASE": "NYSEAMERICAN",  # NYSE American (AMEX)
-    "PCX": "NYSEARCA",
-}
-
-
-def _google_finance_hyperlink(symbol: str, yf_exchange: str = "") -> str:
-    """Sheets HYPERLINK formula → Google Finance, or plain symbol if exchange unknown."""
-    if symbol.endswith(".HK"):
-        url = f"https://www.google.com/finance/quote/{symbol[:-3]}:HKG"
-    else:
-        google_ex = YF_TO_GOOGLE_EXCHANGE.get(yf_exchange)
-        if not google_ex:
-            return symbol
-        # yfinance normalizes class shares with '-' (BRK-B); Google uses '.' (BRK.B)
-        google_sym = symbol.replace("-", ".")
-        url = f"https://www.google.com/finance/quote/{google_sym}:{google_ex}"
-    return f'=HYPERLINK("{url}","{symbol}")'
 
 
 def slugify(name: str) -> str:
@@ -320,14 +213,12 @@ def _load_service_account_creds(sa_json_path: str | None):
 def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
                           breakouts: pd.DataFrame, near: pd.DataFrame,
                           sa_json_path: str | None = None,
-                          tab_prefix: str = "",
-                          exchanges: dict[str, str] | None = None) -> str:
+                          tab_prefix: str = "") -> str:
     import gspread
 
     creds = _load_service_account_creds(sa_json_path)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_id)
-    exchanges = exchanges or {}
 
     today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     summary = pd.DataFrame({
@@ -337,18 +228,9 @@ def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
 
     def _df_with_symbol(df):
         out = df.reset_index().rename(columns={df.index.name or "index": "Symbol"})
-        # Drop columns the Sheet computes live via GOOGLEFINANCE so users can
-        # add their own formulas (price, marketcap, AI()) without our writes
-        # clobbering them.
-        out = out.drop(columns=[c for c in ("Price", "Market Cap") if c in out.columns])
-        # Round numerics for cleaner Sheet display
-        for c in ("52-Week High", "Volume Ratio", "Day Change (%)"):
+        for c in ("52-Week High", "Volume Ratio"):
             if c in out.columns:
                 out[c] = out[c].round(2)
-        # Wrap each ticker in a HYPERLINK to its Google Finance page.
-        out["Symbol"] = out["Symbol"].apply(
-            lambda s: _google_finance_hyperlink(s, exchanges.get(s, ""))
-        )
         return out
 
     breakouts_out = _df_with_symbol(breakouts)
@@ -407,14 +289,14 @@ def print_summary(universe_name: str, breakouts: pd.DataFrame, near: pd.DataFram
     else:
         print()
 
-    desired = ["Sector", "Market Cap", "Price", "Day Change (%)", "Distance to High (%)", "Volume Ratio"]
+    desired = ["52-Week High", "Distance to High (%)", "Volume Ratio"]
 
     def _fmt(df):
         if df.empty:
             return "  none"
         cols = [c for c in desired if c in df.columns]
         out = df[cols].copy()
-        for c in ("Price", "Day Change (%)", "Distance to High (%)", "Volume Ratio"):
+        for c in ("52-Week High", "Distance to High (%)", "Volume Ratio"):
             if c in out.columns:
                 out[c] = out[c].round(2)
         return out.to_string()
@@ -445,8 +327,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sleep", type=float, default=2.0, help="Seconds to sleep between batches (default: 2)")
     p.add_argument("--output-dir", type=Path, default=Path("outputs"), help="Output directory (default: ./outputs)")
     p.add_argument("--no-xlsx", action="store_true", help="Skip writing local .xlsx (useful in CI)")
-    p.add_argument("--no-metadata", action="store_true",
-                   help="Skip Sector/Market Cap enrichment (faster, but less context in output)")
     p.add_argument("--sheet-id", default=None,
                    help="Google Sheet ID to write results to. Sheet ID is the long string in the Sheet URL.")
     p.add_argument("--sa-json", default=None,
@@ -489,17 +369,6 @@ def main() -> int:
         raw, args.lookback_days, args.soft_breakout, args.proximity, args.volume_threshold,
     )
 
-    exchanges: dict[str, str] = {}
-    if not args.no_metadata:
-        # Enrich both tables in one call so we only pay the crumb-warmup cost
-        # once. Splitting into two separate calls causes the first call to fail
-        # cold on cloud IPs, blanking out Sector/Market Cap for breakouts.
-        n_breakouts = len(breakouts)
-        combined = pd.concat([breakouts, near]) if not near.empty else breakouts
-        combined, exchanges = enrich_with_metadata(combined)
-        breakouts = combined.iloc[:n_breakouts]
-        near = combined.iloc[n_breakouts:]
-
     out_path = None
     if not args.no_xlsx:
         out_path = export_xlsx(args.output_dir, universe_name, breakouts, near)
@@ -511,7 +380,6 @@ def main() -> int:
             sheet_id=args.sheet_id, universe_name=universe_name, n_screened=len(raw),
             breakouts=breakouts, near=near, sa_json_path=args.sa_json,
             tab_prefix=tab_prefix,
-            exchanges=exchanges,
         )
         print(f"\nWrote results to Google Sheet: {url}")
     return 0
