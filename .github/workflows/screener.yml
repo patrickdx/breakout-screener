@@ -2,8 +2,8 @@ name: Daily Breakout Screener
 
 on:
   schedule:
-    # 22:00 UTC weekdays = ~5pm ET (after US market close, regardless of DST)
-    - cron: '0 22 * * 1-5'
+    # 21:00 UTC weekdays = ~5pm ET (after US market close, regardless of DST)
+    - cron: '0 21 * * 1-5'
   workflow_dispatch: {}  # allow manual run from the Actions tab
 
 jobs:
