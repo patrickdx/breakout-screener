@@ -49,7 +49,17 @@ jobs:
           git add archive/
           if git diff --cached --quiet; then
             echo "No new archive file to commit."
-          else
-            git commit -m "Archive screener output: $(date -u +%Y-%m-%d)"
-            git push
+            exit 0
           fi
+          git commit -m "Archive screener output: $(date -u +%Y-%m-%d)"
+          # Retry with rebase in case main moved during the run (re-runs of
+          # this workflow, or concurrent human pushes). The archive file is
+          # date-stamped so any second push rebases cleanly with no conflict.
+          for i in 1 2 3 4 5; do
+            if git push; then exit 0; fi
+            echo "push attempt $i rejected; pulling --rebase and retrying"
+            git pull --rebase origin main
+            sleep $((i * 3))
+          done
+          echo "::error::Failed to push archive after 5 attempts"
+          exit 1
