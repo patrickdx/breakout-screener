@@ -168,12 +168,97 @@ def compute_signals(raw: dict[str, pd.DataFrame], lookback_days: int,
 
     def build(mask):
         return pd.DataFrame({
+            "Price": current_close[mask],
             "52-Week High": rolling_high_today[mask],
             "Distance to High (%)": (proximity[mask] * 100).round(2),
             "Volume Ratio": volume_ratio[mask],
         }).dropna().sort_values(by="Distance to High (%)")
 
     return build(breakouts_mask), build(near_mask)
+
+
+def _format_market_cap(mc) -> str:
+    if mc is None or (isinstance(mc, float) and pd.isna(mc)):
+        return ""
+    try:
+        mc = float(mc)
+    except (TypeError, ValueError):
+        return ""
+    if mc >= 1e12:
+        return f"{mc / 1e12:.2f}T"
+    if mc >= 1e9:
+        return f"{mc / 1e9:.2f}B"
+    if mc >= 1e6:
+        return f"{mc / 1e6:.0f}M"
+    return f"{mc:,.0f}"
+
+
+def enrich_with_metadata(df: pd.DataFrame, max_workers: int = 10) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Add 'Sector' and 'Market Cap' columns by querying yfinance Ticker.info per symbol.
+
+    Hits Yahoo's quoteSummary endpoint once per ticker, parallelized with threads.
+    Silent fallback to "" for missing/flaky metadata responses.
+
+    Returns the enriched DataFrame and a {symbol: yfinance exchange code} dict
+    (used downstream to build Google Finance hyperlinks).
+    """
+    if df.empty:
+        df = df.copy()
+        df["Sector"] = pd.Series(dtype=object)
+        df["Market Cap"] = pd.Series(dtype=object)
+        return df, {}
+
+    from concurrent.futures import ThreadPoolExecutor
+    from curl_cffi import requests as curl_requests
+
+    # Browser-impersonating session bypasses Yahoo's bot-detection on cloud
+    # IPs (e.g. GitHub Actions runners), which otherwise returns empty .info.
+    session = curl_requests.Session(impersonate="chrome")
+
+    def fetch(sym):
+        try:
+            info = yf.Ticker(sym, session=session).info or {}
+            return sym, info.get("sector") or "", info.get("marketCap"), info.get("exchange") or ""
+        except Exception:
+            return sym, "", None, ""
+
+    symbols = df.index.tolist()
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        results = list(tqdm(ex.map(fetch, symbols), total=len(symbols), desc="Fetching metadata"))
+
+    sectors = {s: sec for s, sec, _, _ in results}
+    mcaps = {s: _format_market_cap(mc) for s, _, mc, _ in results}
+    exchanges = {s: exc for s, _, _, exc in results}
+
+    out = df.copy()
+    out.insert(0, "Sector", out.index.map(sectors))
+    out.insert(1, "Market Cap", out.index.map(mcaps))
+    return out, exchanges
+
+
+# Yahoo Finance "exchange" code → Google Finance exchange suffix
+YF_TO_GOOGLE_EXCHANGE = {
+    "NMS": "NASDAQ",   # Nasdaq Global Select
+    "NGM": "NASDAQ",   # Nasdaq Global Market
+    "NCM": "NASDAQ",   # Nasdaq Capital Market
+    "NYQ": "NYSE",
+    "ASE": "NYSEAMERICAN",  # NYSE American (AMEX)
+    "PCX": "NYSEARCA",
+}
+
+
+def _google_finance_hyperlink(symbol: str, yf_exchange: str = "") -> str:
+    """Sheets HYPERLINK formula → Google Finance, or plain symbol if exchange unknown."""
+    if symbol.endswith(".HK"):
+        url = f"https://www.google.com/finance/quote/{symbol[:-3]}:HKG"
+    else:
+        google_ex = YF_TO_GOOGLE_EXCHANGE.get(yf_exchange)
+        if not google_ex:
+            return symbol
+        # yfinance normalizes class shares with '-' (BRK-B); Google uses '.' (BRK.B)
+        google_sym = symbol.replace("-", ".")
+        url = f"https://www.google.com/finance/quote/{google_sym}:{google_ex}"
+    return f'=HYPERLINK("{url}","{symbol}")'
 
 
 def slugify(name: str) -> str:
@@ -213,12 +298,14 @@ def _load_service_account_creds(sa_json_path: str | None):
 def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
                           breakouts: pd.DataFrame, near: pd.DataFrame,
                           sa_json_path: str | None = None,
-                          tab_prefix: str = "") -> str:
+                          tab_prefix: str = "",
+                          exchanges: dict[str, str] | None = None) -> str:
     import gspread
 
     creds = _load_service_account_creds(sa_json_path)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_id)
+    exchanges = exchanges or {}
 
     today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     summary = pd.DataFrame({
@@ -228,38 +315,34 @@ def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
 
     def _df_with_symbol(df):
         out = df.reset_index().rename(columns={df.index.name or "index": "Symbol"})
-        for c in ("52-Week High", "Volume Ratio"):
+        # Round numerics for cleaner Sheet display
+        for c in ("Price", "52-Week High", "Volume Ratio"):
             if c in out.columns:
                 out[c] = out[c].round(2)
+        # Wrap each ticker in a HYPERLINK to its Google Finance page.
+        out["Symbol"] = out["Symbol"].apply(
+            lambda s: _google_finance_hyperlink(s, exchanges.get(s, ""))
+        )
         return out
 
     breakouts_out = _df_with_symbol(breakouts)
     near_out = _df_with_symbol(near)
 
     def get_or_create_ws(title, rows, cols):
-        # No ws.clear() — write_df handles range-bound updates so user
-        # formulas and formatting in adjacent columns are preserved.
         try:
-            return sh.worksheet(title)
+            ws = sh.worksheet(title)
+            ws.clear()
+            return ws
         except gspread.WorksheetNotFound:
             return sh.add_worksheet(title=title, rows=str(max(rows, 100)), cols=str(max(cols, 10)))
 
     def write_df(ws, df):
         if df.empty:
-            rows = [["(none)"]]
-        else:
-            rows = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
-
-        n_rows = len(rows)
-        n_cols = len(rows[0])
-        last_col = chr(ord("A") + n_cols - 1)
-        # Wipe the entire script-owned column range (values only, not formatting)
-        # before writing fresh data — guarantees no stale residue from a prior
-        # run that had more rows or wrote to cells we no longer touch. Columns
-        # beyond `last_col` are user-owned and never touched.
-        ws.batch_clear([f"A:{last_col}"])
-        ws.update(values=rows, range_name=f"A1:{last_col}{n_rows}",
-                  value_input_option="USER_ENTERED")
+            ws.update([["(none)"]])
+            return
+        rows = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
+        # USER_ENTERED so the HYPERLINK() formulas in the Symbol column render as links.
+        ws.update(rows, value_input_option="USER_ENTERED")
 
     write_df(get_or_create_ws(f"{tab_prefix}Summary", 10, 2), summary)
     write_df(get_or_create_ws(f"{tab_prefix}Breakouts", len(breakouts_out) + 1, 5), breakouts_out)
@@ -285,14 +368,14 @@ def print_summary(universe_name: str, breakouts: pd.DataFrame, near: pd.DataFram
     else:
         print()
 
-    desired = ["52-Week High", "Distance to High (%)", "Volume Ratio"]
+    desired = ["Sector", "Market Cap", "Price", "Distance to High (%)", "Volume Ratio"]
 
     def _fmt(df):
         if df.empty:
             return "  none"
         cols = [c for c in desired if c in df.columns]
         out = df[cols].copy()
-        for c in ("52-Week High", "Distance to High (%)", "Volume Ratio"):
+        for c in ("Price", "Distance to High (%)", "Volume Ratio"):
             if c in out.columns:
                 out[c] = out[c].round(2)
         return out.to_string()
@@ -323,6 +406,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sleep", type=float, default=2.0, help="Seconds to sleep between batches (default: 2)")
     p.add_argument("--output-dir", type=Path, default=Path("outputs"), help="Output directory (default: ./outputs)")
     p.add_argument("--no-xlsx", action="store_true", help="Skip writing local .xlsx (useful in CI)")
+    p.add_argument("--no-metadata", action="store_true",
+                   help="Skip Sector/Market Cap enrichment (faster, but less context in output)")
     p.add_argument("--sheet-id", default=None,
                    help="Google Sheet ID to write results to. Sheet ID is the long string in the Sheet URL.")
     p.add_argument("--sa-json", default=None,
@@ -365,6 +450,12 @@ def main() -> int:
         raw, args.lookback_days, args.soft_breakout, args.proximity, args.volume_threshold,
     )
 
+    exchanges: dict[str, str] = {}
+    if not args.no_metadata:
+        breakouts, ex1 = enrich_with_metadata(breakouts)
+        near, ex2 = enrich_with_metadata(near)
+        exchanges = {**ex1, **ex2}
+
     out_path = None
     if not args.no_xlsx:
         out_path = export_xlsx(args.output_dir, universe_name, breakouts, near)
@@ -376,6 +467,7 @@ def main() -> int:
             sheet_id=args.sheet_id, universe_name=universe_name, n_screened=len(raw),
             breakouts=breakouts, near=near, sa_json_path=args.sa_json,
             tab_prefix=tab_prefix,
+            exchanges=exchanges,
         )
         print(f"\nWrote results to Google Sheet: {url}")
     return 0
