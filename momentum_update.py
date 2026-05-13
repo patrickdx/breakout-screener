@@ -156,12 +156,14 @@ def compute_signals(raw: dict[str, pd.DataFrame], lookback_days: int,
     rolling_high = close.rolling(lookback_days, min_periods=1).max()
 
     current_close = close.iloc[-1]
+    prev_close = close.iloc[-2]
     rolling_high_today = rolling_high.iloc[-1]
     latest_volume = pd.Series({t: v.iloc[-1] for t, v in volume.items()})
     latest_avg_volume = pd.Series({t: a.iloc[-1] for t, a in avg_vol_50.items()})
 
     volume_ratio = latest_volume / latest_avg_volume
     proximity = (rolling_high_today - current_close) / rolling_high_today
+    day_change = (current_close - prev_close) / prev_close * 100
 
     breakouts_mask = (proximity <= soft_breakout_pct) & (volume_ratio > volume_threshold)
     near_mask = (proximity <= proximity_threshold) & (~breakouts_mask) & (rolling_high_today > 0)
@@ -169,6 +171,7 @@ def compute_signals(raw: dict[str, pd.DataFrame], lookback_days: int,
     def build(mask):
         return pd.DataFrame({
             "Price": current_close[mask],
+            "Day Change (%)": day_change[mask].round(2),
             "52-Week High": rolling_high_today[mask],
             "Distance to High (%)": (proximity[mask] * 100).round(2),
             "Volume Ratio": volume_ratio[mask],
@@ -215,16 +218,35 @@ def enrich_with_metadata(df: pd.DataFrame, max_workers: int = 10) -> tuple[pd.Da
     # IPs (e.g. GitHub Actions runners), which otherwise returns empty .info.
     session = curl_requests.Session(impersonate="chrome")
 
-    def fetch(sym):
-        try:
-            info = yf.Ticker(sym, session=session).info or {}
-            return sym, info.get("sector") or "", info.get("marketCap"), info.get("exchange") or ""
-        except Exception:
-            return sym, "", None, ""
-
     symbols = df.index.tolist()
+
+    # Pre-warm sequentially: Yahoo's first quoteSummary call from a cold session
+    # often hits 401 Invalid Crumb. Letting one call go first lets yfinance's
+    # internal retry establish a valid crumb cookie before N workers race for it.
+    try:
+        yf.Ticker(symbols[0], session=session).info
+    except Exception:
+        pass
+
+    def fetch(sym):
+        for attempt in range(2):
+            try:
+                info = yf.Ticker(sym, session=session).info or {}
+                sector = info.get("sector") or ""
+                mc = info.get("marketCap")
+                exc = info.get("exchange") or ""
+                if sector or mc is not None or exc:
+                    return sym, sector, mc, exc
+            except Exception:
+                pass
+        return sym, "", None, ""
+
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         results = list(tqdm(ex.map(fetch, symbols), total=len(symbols), desc="Fetching metadata"))
+
+    missing = sum(1 for _, sec, mc, _ in results if not sec and mc is None)
+    if missing:
+        print(f"[enrich_with_metadata] {missing}/{len(results)} symbols returned no metadata", file=sys.stderr)
 
     sectors = {s: sec for s, sec, _, _ in results}
     mcaps = {s: _format_market_cap(mc) for s, _, mc, _ in results}
@@ -316,7 +338,7 @@ def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
     def _df_with_symbol(df):
         out = df.reset_index().rename(columns={df.index.name or "index": "Symbol"})
         # Round numerics for cleaner Sheet display
-        for c in ("Price", "52-Week High", "Volume Ratio"):
+        for c in ("Price", "52-Week High", "Volume Ratio", "Day Change (%)"):
             if c in out.columns:
                 out[c] = out[c].round(2)
         # Wrap each ticker in a HYPERLINK to its Google Finance page.
@@ -368,14 +390,14 @@ def print_summary(universe_name: str, breakouts: pd.DataFrame, near: pd.DataFram
     else:
         print()
 
-    desired = ["Sector", "Market Cap", "Price", "Distance to High (%)", "Volume Ratio"]
+    desired = ["Sector", "Market Cap", "Price", "Day Change (%)", "Distance to High (%)", "Volume Ratio"]
 
     def _fmt(df):
         if df.empty:
             return "  none"
         cols = [c for c in desired if c in df.columns]
         out = df[cols].copy()
-        for c in ("Price", "Distance to High (%)", "Volume Ratio"):
+        for c in ("Price", "Day Change (%)", "Distance to High (%)", "Volume Ratio"):
             if c in out.columns:
                 out[c] = out[c].round(2)
         return out.to_string()
@@ -452,9 +474,14 @@ def main() -> int:
 
     exchanges: dict[str, str] = {}
     if not args.no_metadata:
-        breakouts, ex1 = enrich_with_metadata(breakouts)
-        near, ex2 = enrich_with_metadata(near)
-        exchanges = {**ex1, **ex2}
+        # Enrich both tables in one call so we only pay the crumb-warmup cost
+        # once. Splitting into two separate calls causes the first call to fail
+        # cold on cloud IPs, blanking out Sector/Market Cap for breakouts.
+        n_breakouts = len(breakouts)
+        combined = pd.concat([breakouts, near]) if not near.empty else breakouts
+        combined, exchanges = enrich_with_metadata(combined)
+        breakouts = combined.iloc[:n_breakouts]
+        near = combined.iloc[n_breakouts:]
 
     out_path = None
     if not args.no_xlsx:
