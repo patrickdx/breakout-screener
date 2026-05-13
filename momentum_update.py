@@ -329,20 +329,29 @@ def write_to_google_sheet(sheet_id: str, universe_name: str, n_screened: int,
     near_out = _df_with_symbol(near)
 
     def get_or_create_ws(title, rows, cols):
+        # No ws.clear() — write_df handles range-bound clears so user
+        # formulas/values in columns beyond what we write are preserved.
         try:
-            ws = sh.worksheet(title)
-            ws.clear()
-            return ws
+            return sh.worksheet(title)
         except gspread.WorksheetNotFound:
             return sh.add_worksheet(title=title, rows=str(max(rows, 100)), cols=str(max(cols, 10)))
 
     def write_df(ws, df):
         if df.empty:
-            ws.update([["(none)"]])
-            return
-        rows = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
+            rows = [["(none)"]]
+        else:
+            rows = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
+
+        n_rows = len(rows)
+        n_cols = len(rows[0])
+        last_col = chr(ord("A") + n_cols - 1)
+        # Wipe values in the script-owned column range (A..last_col), keeping
+        # formatting intact and leaving columns beyond last_col untouched —
+        # that's where user-added formulas live.
+        ws.batch_clear([f"A:{last_col}"])
         # USER_ENTERED so the HYPERLINK() formulas in the Symbol column render as links.
-        ws.update(rows, value_input_option="USER_ENTERED")
+        ws.update(values=rows, range_name=f"A1:{last_col}{n_rows}",
+                  value_input_option="USER_ENTERED")
 
     write_df(get_or_create_ws(f"{tab_prefix}Summary", 10, 2), summary)
     write_df(get_or_create_ws(f"{tab_prefix}Breakouts", len(breakouts_out) + 1, 5), breakouts_out)
@@ -452,9 +461,15 @@ def main() -> int:
 
     exchanges: dict[str, str] = {}
     if not args.no_metadata:
-        breakouts, ex1 = enrich_with_metadata(breakouts)
-        near, ex2 = enrich_with_metadata(near)
-        exchanges = {**ex1, **ex2}
+        # Enrich both tables in one call so we only pay the cold-session
+        # crumb-warmup cost once. Two separate calls causes the first one to
+        # hit Yahoo's 401 "Invalid Crumb" on cloud IPs and return blank
+        # Sector/Market Cap for the entire bucket.
+        n_breakouts = len(breakouts)
+        combined = pd.concat([breakouts, near]) if not near.empty else breakouts
+        combined, exchanges = enrich_with_metadata(combined)
+        breakouts = combined.iloc[:n_breakouts]
+        near = combined.iloc[n_breakouts:]
 
     out_path = None
     if not args.no_xlsx:
