@@ -1,10 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
-outputs/
-*.xlsx
-# ...but keep CI-generated daily archive
-!archive/**/*.xlsx
 
 # Never commit Google service-account keys
 service-account*.json
