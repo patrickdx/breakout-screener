@@ -1,6 +1,7 @@
 """52-week high breakout screener for Nasdaq common stock.
 
-Flags stocks at or near their 52-week high and writes two tables to a Google Sheet:
+Flags stocks at or near their 52-week high and writes three tabs to a Google Sheet:
+  - Summary:        run metadata (universe, last run time, counts)
   - Breakouts:      within SOFT_BREAKOUT_PCT of the high AND volume > VOLUME_THRESHOLD * 50-day avg
   - Near Breakouts: within PROXIMITY_THRESHOLD of the high (no volume requirement)
 """
@@ -111,7 +112,8 @@ def compute_signals(raw: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.Data
     return build(breakouts_mask), build(near_mask)
 
 
-def write_to_sheet(sheet_id: str, breakouts: pd.DataFrame, near: pd.DataFrame) -> str:
+def write_to_sheet(sheet_id: str, n_screened: int,
+                   breakouts: pd.DataFrame, near: pd.DataFrame) -> str:
     import gspread
     from google.oauth2.service_account import Credentials
 
@@ -121,11 +123,14 @@ def write_to_sheet(sheet_id: str, breakouts: pd.DataFrame, near: pd.DataFrame) -
     creds = Credentials.from_service_account_info(json.loads(raw), scopes=GOOGLE_SCOPES)
     sh = gspread.authorize(creds).open_by_key(sheet_id)
 
-    def write_df(title: str, df: pd.DataFrame):
+    def get_or_create(title: str):
         try:
-            ws = sh.worksheet(title)
+            return sh.worksheet(title)
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=title, rows="100", cols="10")
+            return sh.add_worksheet(title=title, rows="100", cols="10")
+
+    def write_table(title: str, df: pd.DataFrame):
+        ws = get_or_create(title)
         ws.clear()
         if df.empty:
             ws.update(values=[["(none)"]], range_name="A1")
@@ -134,8 +139,21 @@ def write_to_sheet(sheet_id: str, breakouts: pd.DataFrame, near: pd.DataFrame) -
         rows.extend([[idx] + list(row) for idx, row in df.iterrows()])
         ws.update(values=rows, range_name="A1")
 
-    write_df("Breakouts", breakouts)
-    write_df("Near Breakouts", near)
+    last_run = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    summary_rows = [
+        ["Field", "Value"],
+        ["Universe", "NASDAQ"],
+        ["Last Run", last_run],
+        ["Tickers Screened", n_screened],
+        ["Breakouts", len(breakouts)],
+        ["Near Breakouts", len(near)],
+    ]
+    ws = get_or_create("Summary")
+    ws.clear()
+    ws.update(values=summary_rows, range_name="A1")
+
+    write_table("Breakouts", breakouts)
+    write_table("Near Breakouts", near)
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}"
 
 
@@ -160,7 +178,7 @@ def main() -> int:
     breakouts, near = compute_signals(raw)
     print(f"Breakouts: {len(breakouts)} | Near Breakouts: {len(near)}")
 
-    url = write_to_sheet(sheet_id, breakouts, near)
+    url = write_to_sheet(sheet_id, len(raw), breakouts, near)
     print(f"Wrote results to {url}")
     return 0
 
