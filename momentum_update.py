@@ -129,31 +129,32 @@ def write_to_sheet(sheet_id: str, n_screened: int,
         except gspread.WorksheetNotFound:
             return sh.add_worksheet(title=title, rows="100", cols="10")
 
-    def write_table(title: str, df: pd.DataFrame):
+    def write(title: str, rows: list[list]):
+        # Clear ONLY columns A..last_col so user-added formulas in columns
+        # beyond last_col are preserved across runs.
         ws = get_or_create(title)
-        ws.clear()
+        n_cols = len(rows[0])
+        last_col = chr(ord("A") + n_cols - 1)
+        ws.batch_clear([f"A:{last_col}"])
+        ws.update(values=rows, range_name=f"A1:{last_col}{len(rows)}")
+
+    def table_rows(df: pd.DataFrame) -> list[list]:
+        header = ["Symbol", "Price", "52-Week High", "Distance to High (%)", "Volume Ratio"]
         if df.empty:
-            ws.update(values=[["(none)"]], range_name="A1")
-            return
-        rows = [["Symbol"] + df.columns.tolist()]
-        rows.extend([[idx] + list(row) for idx, row in df.iterrows()])
-        ws.update(values=rows, range_name="A1")
+            return [header, ["(none)", "", "", "", ""]]
+        return [header] + [[idx] + list(row) for idx, row in df.iterrows()]
 
     last_run = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    summary_rows = [
+    write("Summary", [
         ["Field", "Value"],
         ["Universe", "NASDAQ"],
         ["Last Run", last_run],
         ["Tickers Screened", n_screened],
         ["Breakouts", len(breakouts)],
         ["Near Breakouts", len(near)],
-    ]
-    ws = get_or_create("Summary")
-    ws.clear()
-    ws.update(values=summary_rows, range_name="A1")
-
-    write_table("Breakouts", breakouts)
-    write_table("Near Breakouts", near)
+    ])
+    write("Breakouts", table_rows(breakouts))
+    write("Near Breakouts", table_rows(near))
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}"
 
 
