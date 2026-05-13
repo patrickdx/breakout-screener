@@ -2,8 +2,12 @@ name: Daily Breakout Screener
 
 on:
   schedule:
-    # 21:00 UTC weekdays = ~5pm ET (after US market close, regardless of DST)
-    - cron: '0 21 * * 1-5'
+    # 20:30 UTC weekdays = 4:30pm EDT in summer (30 min after US market close).
+    # Off-hour minute (:30) dodges the top-of-the-hour GitHub Actions schedule
+    # lag, so actual execution usually lands near 5pm Toronto.
+    # Caveat: in EST (winter) this fires at 3:30pm Toronto — BEFORE the 4pm
+    # US close. Revisit when DST ends in November.
+    - cron: '30 20 * * 1-5'
   workflow_dispatch: {}  # allow manual run from the Actions tab
 
 jobs:
