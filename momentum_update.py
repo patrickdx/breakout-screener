@@ -131,12 +131,16 @@ def write_to_sheet(sheet_id: str, n_screened: int,
 
     def write(title: str, rows: list[list]):
         # Clear ONLY columns A..last_col so user-added formulas in columns
-        # beyond last_col are preserved across runs.
+        # beyond last_col are preserved across runs. Resize the worksheet
+        # to exactly fit the data so user formula columns in H+ don't show
+        # N/A on phantom rows past the script's data range.
         ws = get_or_create(title)
+        n_rows = len(rows)
         n_cols = len(rows[0])
         last_col = chr(ord("A") + n_cols - 1)
+        ws.resize(rows=max(n_rows, 1))
         ws.batch_clear([f"A:{last_col}"])
-        ws.update(values=rows, range_name=f"A1:{last_col}{len(rows)}")
+        ws.update(values=rows, range_name=f"A1:{last_col}{n_rows}")
 
     def table_rows(df: pd.DataFrame) -> list[list]:
         header = ["Symbol", "Price", "52-Week High", "Distance to High (%)", "Volume Ratio"]
