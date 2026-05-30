@@ -1,3 +1,5 @@
 yfinance
 pandas
 tqdm
+gspread
+google-auth

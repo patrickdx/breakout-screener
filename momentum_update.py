@@ -1,11 +1,11 @@
 """52-week high breakout screener for Nasdaq common stock.
 
-Flags stocks at or near their 52-week high and renders a static dashboard
-(site/index.html, published via GitHub Pages):
+Flags stocks at or near their 52-week high and writes three tabs to a Google Sheet:
   - Summary:        run metadata (universe, last run time, counts)
   - Breakouts:      within SOFT_BREAKOUT_PCT of the high AND volume > VOLUME_THRESHOLD * 50-day avg
   - Near Breakouts: within PROXIMITY_THRESHOLD of the high (no volume requirement)
-Each table is enriched with ApeWisdom Reddit mention buzz.
+Result rows are enriched with a Sector column (GICS-style industry via yfinance).
+The script owns columns A..F; user formula columns in G+ are preserved across runs.
 """
 import datetime
 import json
@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 
 import pandas as pd
@@ -25,18 +26,13 @@ VOLUME_THRESHOLD = 1.2
 LOOKBACK_DAYS = 365
 BATCH_SIZE = 50
 SLEEP_BETWEEN = 2.0
+SECTOR_WORKERS = 8
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
-
-# Social buzz (Reddit mention volume) via ApeWisdom. Free, no auth. The list is
-# ranked by mention count and paginated 100/page; we pull the whole list and join
-# it to the breakout tickers. Tickers absent from the list simply get 0 mentions.
-APEWISDOM_URL = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/{page}"
-APEWISDOM_MAX_PAGES = 15
-
-# Columns rendered in each results table, in order. Index (Symbol) is prepended.
-TABLE_COLUMNS = ["Symbol", "Price", "52-Week High", "Distance to High (%)",
-                 "Volume Ratio", "Mentions", "Mentions 24h Δ%"]
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
 # Security Name patterns that indicate non-common-stock instruments (warrants,
 # rights, SPAC units/Class A, preferreds, debt notes, preferred-wrapper ADRs).
@@ -64,54 +60,6 @@ def load_nasdaq() -> list[str]:
         mask |= name_lower.str.contains(pat, na=False, regex=False)
     df = df[~mask]
     return df["Symbol"].tolist()
-
-
-def fetch_social_buzz() -> dict[str, dict]:
-    """Pull the full ApeWisdom mention-ranked list into {ticker: {...}}.
-
-    Each value holds mentions, upvotes, rank, and 24h-ago counts so callers can
-    compute mention momentum. Failures are non-fatal: returns whatever pages
-    succeeded (possibly empty) so a buzz outage never blocks the screen.
-    """
-    buzz: dict[str, dict] = {}
-    for page in range(1, APEWISDOM_MAX_PAGES + 1):
-        url = APEWISDOM_URL.format(page=page)
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            payload = json.loads(urllib.request.urlopen(req, timeout=30).read().decode("utf-8"))
-        except Exception as e:
-            print(f"  ApeWisdom page {page} failed: {e}", file=sys.stderr)
-            break
-        results = payload.get("results", [])
-        if not results:
-            break
-        for r in results:
-            buzz[r["ticker"].upper()] = r
-        if page >= payload.get("pages", page):
-            break
-        time.sleep(0.5)
-    return buzz
-
-
-def add_social_columns(df: pd.DataFrame, buzz: dict[str, dict]) -> pd.DataFrame:
-    """Append Mentions and 24h mention-change columns, joined by ticker (index)."""
-    if df.empty:
-        return df
-    mentions, momentum = [], []
-    for sym in df.index:
-        row = buzz.get(str(sym).upper())
-        if not row:
-            mentions.append(0)
-            momentum.append("")
-            continue
-        now = row.get("mentions", 0)
-        prior = row.get("mentions_24h_ago", 0) or 0
-        mentions.append(now)
-        momentum.append(round((now - prior) / max(prior, 1) * 100, 1) if prior else "")
-    df = df.copy()
-    df["Mentions"] = mentions
-    df["Mentions 24h Δ%"] = momentum
-    return df
 
 
 def download_all(tickers: list[str], start, end) -> tuple[dict[str, pd.DataFrame], list[str]]:
@@ -168,144 +116,92 @@ def compute_signals(raw: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.Data
     return build(breakouts_mask), build(near_mask)
 
 
-DASHBOARD_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NASDAQ Breakout Screener</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridjs/dist/theme/mermaid.min.css">
-<style>
-  :root { --bg:#0e1117; --card:#161b22; --line:#30363d; --fg:#e6edf3; --muted:#8b949e; --accent:#58a6ff; }
-  * { box-sizing: border-box; }
-  body { margin:0; padding:24px; background:var(--bg); color:var(--fg);
-         font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
-  h1 { font-size:22px; margin:0 0 4px; }
-  h2 { font-size:17px; margin:32px 0 12px; }
-  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
-  .stats { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:8px; }
-  .stat { background:var(--card); border:1px solid var(--line); border-radius:10px;
-          padding:12px 16px; min-width:120px; }
-  .stat .n { font-size:22px; font-weight:600; }
-  .stat .l { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
-  a { color:var(--accent); text-decoration:none; }
-  a:hover { text-decoration:underline; }
-  .pos { color:#3fb950; } .neg { color:#f85149; }
-  .gridjs-wrapper, .gridjs-table { background:var(--card); }
-  table.gridjs-table td, table.gridjs-table th { color:var(--fg); }
-  .gridjs-th { background:var(--card); }
-  footer { margin-top:32px; color:var(--muted); font-size:12px; }
-</style>
-</head>
-<body>
-  <h1>NASDAQ 52-Week High Breakout Screener</h1>
-  <div class="sub">Last run: {{LAST_RUN}}</div>
-  <div class="stats">
-    <div class="stat"><div class="n">{{N_SCREENED}}</div><div class="l">Screened</div></div>
-    <div class="stat"><div class="n">{{N_BREAKOUTS}}</div><div class="l">Breakouts</div></div>
-    <div class="stat"><div class="n">{{N_NEAR}}</div><div class="l">Near Breakouts</div></div>
-  </div>
+def fetch_sectors(tickers: list[str]) -> dict[str, str]:
+    """Resolve a GICS-style industry per ticker via yfinance (threaded).
 
-  <h2>Breakouts <span class="sub">&mdash; at the high on elevated volume</span></h2>
-  <div id="breakouts"></div>
-
-  <h2>Near Breakouts <span class="sub">&mdash; within range, no volume filter</span></h2>
-  <div id="near"></div>
-
-  <footer>Data: Yahoo Finance (prices) &middot; ApeWisdom (Reddit mentions). Symbols link to Finviz.</footer>
-
-<script src="https://cdn.jsdelivr.net/npm/gridjs/dist/gridjs.umd.js"></script>
-<script>
-  const BREAKOUTS = {{BREAKOUTS_JSON}};
-  const NEAR = {{NEAR_JSON}};
-
-  const symbolCol = {
-    name: "Symbol",
-    formatter: (c) => gridjs.html(
-      `<a href="https://finviz.com/quote.ashx?t=${c}" target="_blank" rel="noopener">${c}</a>`)
-  };
-  const momentumCol = {
-    name: "Mentions 24h \\u0394%",
-    formatter: (c) => {
-      if (c === "" || c === null || c === undefined) return "";
-      const cls = c > 0 ? "pos" : (c < 0 ? "neg" : "");
-      const sign = c > 0 ? "+" : "";
-      return gridjs.html(`<span class="${cls}">${sign}${c}%</span>`);
-    }
-  };
-  const columns = [symbolCol, "Price", "52-Week High", "Distance to High (%)",
-                   "Volume Ratio", "Mentions", momentumCol];
-
-  function render(id, data) {
-    new gridjs.Grid({
-      columns: columns,
-      data: data,
-      search: true,
-      sort: true,
-      pagination: { limit: 25 },
-      language: { noRecordsFound: "No matches" },
-      style: { table: { "font-size": "14px" } }
-    }).render(document.getElementById(id));
-  }
-  render("breakouts", BREAKOUTS);
-  render("near", NEAR);
-</script>
-</body>
-</html>
-"""
-
-
-def _records(df: pd.DataFrame) -> list[list]:
-    """Turn a results frame into a JSON-safe 2D array in TABLE_COLUMNS order."""
-    import math
-
-    def cell(v):
-        if isinstance(v, str):
-            return v
-        try:
-            f = float(v)
-            return None if math.isnan(f) else f
-        except (TypeError, ValueError):
-            return v
-
-    if df.empty:
-        return []
-    rows = []
-    for idx, row in df.iterrows():
-        rows.append([str(idx)] + [cell(v) for v in row.tolist()])
-    return rows
-
-
-def write_dashboard(out_dir: str, n_screened: int,
-                    breakouts: pd.DataFrame, near: pd.DataFrame) -> str:
-    """Render a self-contained static dashboard to out_dir/index.html.
-
-    Sortable/searchable tables are powered by Grid.js loaded from a CDN; the
-    screener data is embedded inline as JSON so the page is fully static.
+    Uses the granular `industry` field, falling back to the broad `sector`.
+    Failures are non-fatal: a ticker that can't be resolved gets "" so a slow
+    or rate-limited lookup never blocks the screen.
     """
-    os.makedirs(out_dir, exist_ok=True)
+    def one(t: str) -> tuple[str, str]:
+        try:
+            info = yf.Ticker(t).info
+            return t, (info.get("industry") or info.get("sector") or "")
+        except Exception:
+            return t, ""
+
+    sectors: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=SECTOR_WORKERS) as pool:
+        for t, sec in tqdm(pool.map(one, tickers), total=len(tickers), desc="Sectors"):
+            sectors[t] = sec
+    return sectors
+
+
+def add_sector_column(df: pd.DataFrame, sectors: dict[str, str]) -> pd.DataFrame:
+    """Append a Sector column joined by ticker (the frame index)."""
+    if df.empty:
+        return df
+    df = df.copy()
+    df["Sector"] = [sectors.get(str(sym), "") for sym in df.index]
+    return df
+
+
+def write_to_sheet(sheet_id: str, n_screened: int,
+                   breakouts: pd.DataFrame, near: pd.DataFrame) -> str:
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON env var not set")
+    creds = Credentials.from_service_account_info(json.loads(raw), scopes=GOOGLE_SCOPES)
+    sh = gspread.authorize(creds).open_by_key(sheet_id)
+
+    def get_or_create(title: str):
+        try:
+            return sh.worksheet(title)
+        except gspread.WorksheetNotFound:
+            return sh.add_worksheet(title=title, rows="100", cols="10")
+
+    def write(title: str, rows: list[list]):
+        # Clear ONLY columns A..last_col so user-added formulas in columns
+        # beyond last_col are preserved across runs. Resize the worksheet
+        # to exactly fit the data so user formula columns past the script's
+        # range don't show N/A on phantom rows.
+        ws = get_or_create(title)
+        n_rows = len(rows)
+        n_cols = len(rows[0])
+        last_col = chr(ord("A") + n_cols - 1)
+        ws.resize(rows=max(n_rows, 1))
+        ws.batch_clear([f"A:{last_col}"])
+        ws.update(values=rows, range_name=f"A1:{last_col}{n_rows}")
+
+    def table_rows(df: pd.DataFrame) -> list[list]:
+        header = ["Symbol", "Price", "52-Week High", "Distance to High (%)",
+                  "Volume Ratio", "Sector"]
+        if df.empty:
+            return [header, ["(none)"] + [""] * (len(header) - 1)]
+        return [header] + [[idx] + list(row) for idx, row in df.iterrows()]
+
     last_run = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-
-    def dump(df):
-        # Escape "</" so embedded JSON can't break out of the <script> context.
-        return json.dumps(_records(df)).replace("</", "<\\/")
-
-    html = (DASHBOARD_TEMPLATE
-            .replace("{{LAST_RUN}}", last_run)
-            .replace("{{N_SCREENED}}", str(n_screened))
-            .replace("{{N_BREAKOUTS}}", str(len(breakouts)))
-            .replace("{{N_NEAR}}", str(len(near)))
-            .replace("{{BREAKOUTS_JSON}}", dump(breakouts))
-            .replace("{{NEAR_JSON}}", dump(near)))
-
-    path = os.path.join(out_dir, "index.html")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(html)
-    return path
+    write("Summary", [
+        ["Field", "Value"],
+        ["Universe", "NASDAQ"],
+        ["Last Run", last_run],
+        ["Tickers Screened", n_screened],
+        ["Breakouts", len(breakouts)],
+        ["Near Breakouts", len(near)],
+    ])
+    write("Breakouts", table_rows(breakouts))
+    write("Near Breakouts", table_rows(near))
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}"
 
 
 def main() -> int:
-    out_dir = os.environ.get("OUTPUT_DIR", "site")
+    sheet_id = os.environ.get("SHEET_ID")
+    if not sheet_id:
+        print("SHEET_ID env var not set", file=sys.stderr)
+        return 1
 
     end = datetime.datetime.today()
     start = end - datetime.timedelta(days=LOOKBACK_DAYS)
@@ -322,13 +218,15 @@ def main() -> int:
     breakouts, near = compute_signals(raw)
     print(f"Breakouts: {len(breakouts)} | Near Breakouts: {len(near)}")
 
-    buzz = fetch_social_buzz()
-    print(f"Social buzz: {len(buzz)} tickers from ApeWisdom")
-    breakouts = add_social_columns(breakouts, buzz)
-    near = add_social_columns(near, buzz)
+    # Sectors are only needed for the result rows, not the whole universe.
+    result_tickers = sorted(set(breakouts.index) | set(near.index))
+    sectors = fetch_sectors(result_tickers)
+    print(f"Sectors resolved: {sum(1 for v in sectors.values() if v)}/{len(result_tickers)}")
+    breakouts = add_sector_column(breakouts, sectors)
+    near = add_sector_column(near, sectors)
 
-    path = write_dashboard(out_dir, len(raw), breakouts, near)
-    print(f"Wrote dashboard to {path}")
+    url = write_to_sheet(sheet_id, len(raw), breakouts, near)
+    print(f"Wrote results to {url}")
     return 0
 
 
