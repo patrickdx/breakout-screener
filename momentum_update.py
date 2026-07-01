@@ -1,11 +1,23 @@
 """52-week high breakout screener for Nasdaq common stock.
 
-Flags stocks at or near their 52-week high and writes three tabs to a Google Sheet:
+Every run pulls a year of daily bars, classifies each stock as a Breakout or
+Near-Breakout for today, and writes the result to a Google Sheet. The sheet is
+also the data store: a History tab keeps an append-only, dated log of every run.
+
+Momentum ("Breakout Streak") is computed from those stored rows -- the number of
+consecutive prior runs a symbol has appeared on the Breakouts list, plus today.
+So the streak is real memory across runs, not a same-day guess. On the first
+ever run History is empty and every streak is 1; it builds from there.
+
+Tabs written:
   - Summary:        run metadata (universe, last run time, counts)
-  - Breakouts:      within SOFT_BREAKOUT_PCT of the high AND volume > VOLUME_THRESHOLD * 50-day avg
-  - Near Breakouts: within PROXIMITY_THRESHOLD of the high (no volume requirement)
-Result rows are enriched with a Sector column (GICS-style industry via yfinance).
-The script owns columns A..F; user formula columns in G+ are preserved across runs.
+  - Breakouts:      today's breakouts, sorted by streak then distance to high
+  - Near Breakouts: today's near-breakouts, sorted by distance to high
+  - History:        append-only dated log feeding the streak calculation
+
+Result columns: Symbol, Price, 52-Week High, Distance to High (%), Volume Ratio,
+Breakout Streak, Days Near High, Streak Start, Sector, Market Cap,
+Daily Change (%), Link.
 """
 import datetime
 import json
@@ -34,6 +46,31 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# Full column order the script owns end-to-end (it owns the whole sheet).
+RESULT_COLUMNS = [
+    "Symbol", "Price", "52-Week High", "Distance to High (%)", "Volume Ratio",
+    "Breakout Streak", "Days Near High", "Streak Start",
+    "Sector", "Market Cap", "Daily Change (%)", "Link",
+]
+# Columns produced directly from the price panel (streaks + meta added after).
+PRICE_COLUMNS = [
+    "Symbol", "Price", "52-Week High", "Distance to High (%)",
+    "Volume Ratio", "Daily Change (%)", "Link",
+]
+# Streak columns, derived from the stored History rows.
+STREAK_COLUMNS = ("Breakout Streak", "Days Near High", "Streak Start")
+# Columns derived from yf.Ticker().info (resolved once, threaded).
+META_COLUMNS = ("Sector", "Market Cap")
+# History tab layout — the dated log the streak calculation reads back.
+HISTORY_COLUMNS = [
+    "Date", "List", "Symbol", "Price", "52-Week High", "Distance to High (%)",
+    "Volume Ratio", "Breakout Streak", "Daily Change (%)", "Market Cap", "Sector",
+]
+
+# Link cell is a Google Sheets HYPERLINK formula. Swap the base if you prefer
+# TradingView / Finviz / etc.
+LINK_BASE = "https://finance.yahoo.com/quote/{symbol}"
+
 # Security Name patterns that indicate non-common-stock instruments (warrants,
 # rights, SPAC units/Class A, preferreds, debt notes, preferred-wrapper ADRs).
 NON_COMMON_STOCK_PATTERNS = (
@@ -45,6 +82,10 @@ NON_COMMON_STOCK_PATTERNS = (
     "depositary shares representing",
     "class a ordinary share",
 )
+
+
+def _now() -> datetime.datetime:
+    return datetime.datetime.utcnow()
 
 
 def load_nasdaq() -> list[str]:
@@ -86,68 +127,141 @@ def download_all(tickers: list[str], start, end) -> tuple[dict[str, pd.DataFrame
 
 
 def compute_signals(raw: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Classify today's Breakouts / Near-Breakouts with price-derived columns.
+
+    Streak and metadata columns are added later; this stage is pure price math.
+    """
     tickers = list(raw.keys())
     data = pd.concat(raw, axis=1)
 
-    close = pd.DataFrame({t: data[t]["Close"] for t in tickers})
-    volume = {t: data[(t, "Volume")] for t in tickers}
-    avg_vol_50 = {t: v.rolling(50).mean() for t, v in volume.items()}
-
+    close = pd.DataFrame({t: data[(t, "Close")] for t in tickers})
+    volume = pd.DataFrame({t: data[(t, "Volume")] for t in tickers})
+    avg_vol_50 = volume.rolling(50).mean()
     rolling_high = close.rolling(LOOKBACK_DAYS, min_periods=1).max()
-    current_close = close.iloc[-1]
-    rolling_high_today = rolling_high.iloc[-1]
-    latest_volume = pd.Series({t: v.iloc[-1] for t, v in volume.items()})
-    latest_avg_volume = pd.Series({t: a.iloc[-1] for t, a in avg_vol_50.items()})
 
-    volume_ratio = latest_volume / latest_avg_volume
-    proximity = (rolling_high_today - current_close) / rolling_high_today
+    price = close.iloc[-1]
+    prev = close.iloc[-2]
+    high = rolling_high.iloc[-1]
+    vr_today = volume.iloc[-1] / avg_vol_50.iloc[-1]
+    dist_today = (high - price) / high
+    valid = high.notna() & price.notna() & (high > 0)
 
-    breakouts_mask = (proximity <= SOFT_BREAKOUT_PCT) & (volume_ratio > VOLUME_THRESHOLD)
-    near_mask = (proximity <= PROXIMITY_THRESHOLD) & (~breakouts_mask) & (rolling_high_today > 0)
+    breakout_mask = (dist_today <= SOFT_BREAKOUT_PCT) & (vr_today > VOLUME_THRESHOLD)
+    near_mask = (dist_today <= PROXIMITY_THRESHOLD) & (~breakout_mask)
 
-    def build(mask):
-        return pd.DataFrame({
-            "Price": current_close[mask].round(2),
-            "52-Week High": rolling_high_today[mask].round(2),
-            "Distance to High (%)": (proximity[mask] * 100).round(2),
-            "Volume Ratio": volume_ratio[mask].round(2),
-        }).dropna().sort_values("Distance to High (%)")
+    def daily_change(t: str):
+        p0 = prev[t]
+        if pd.isna(p0) or p0 == 0:
+            return None
+        return round((float(price[t]) / float(p0) - 1) * 100, 2)
 
-    return build(breakouts_mask), build(near_mask)
+    def row(t: str) -> dict:
+        return {
+            "Symbol": t,
+            "Price": round(float(price[t]), 2),
+            "52-Week High": round(float(high[t]), 2),
+            "Distance to High (%)": round(float(dist_today[t]) * 100, 2),
+            "Volume Ratio": None if pd.isna(vr_today[t]) else round(float(vr_today[t]), 2),
+            "Daily Change (%)": daily_change(t),
+            "Link": f'=HYPERLINK("{LINK_BASE.format(symbol=t)}", "{t}")',
+        }
+
+    def frame(mask: pd.Series) -> pd.DataFrame:
+        rows = [row(t) for t in tickers if bool(valid.get(t, False)) and bool(mask[t])]
+        return pd.DataFrame(rows, columns=PRICE_COLUMNS)
+
+    return frame(breakout_mask), frame(near_mask)
 
 
-def fetch_sectors(tickers: list[str]) -> dict[str, str]:
-    """Resolve a GICS-style industry per ticker via yfinance (threaded).
+def compute_streaks(history: pd.DataFrame, breakout_syms: set[str],
+                    near_syms: set[str], run_date: str) -> dict[str, tuple[int, int, str]]:
+    """Streaks from stored rows: consecutive prior runs a symbol was listed.
 
-    Uses the granular `industry` field, falling back to the broad `sector`.
-    Failures are non-fatal: a ticker that can't be resolved gets "" so a slow
-    or rate-limited lookup never blocks the screen.
+    Returns {symbol: (breakout_streak, days_near_high, streak_start)}.
+      breakout_streak  - consecutive runs on the Breakouts list, incl. today.
+      days_near_high   - consecutive runs on either list (on-screen), incl. today.
+      streak_start     - date the current breakout streak began ("" if not a breakout).
+    Walks the ordered prior run-dates, so a skipped run doesn't reset a streak;
+    it counts consecutive *runs*, not calendar days.
     """
-    def one(t: str) -> tuple[str, str]:
-        try:
-            info = yf.Ticker(t).info
-            return t, (info.get("industry") or info.get("sector") or "")
-        except Exception:
-            return t, ""
+    have = (not history.empty
+            and {"Date", "List", "Symbol"} <= set(history.columns))
+    if have:
+        h = history[history["Date"].astype(str) != run_date]
+        prior_dates = sorted(set(h["Date"].astype(str)))
+        breakout_sets = {
+            d: set(h.loc[(h["Date"].astype(str) == d) & (h["List"] == "Breakout"), "Symbol"])
+            for d in prior_dates
+        }
+        onscreen_sets = {
+            d: set(h.loc[h["Date"].astype(str) == d, "Symbol"]) for d in prior_dates
+        }
+    else:
+        prior_dates, breakout_sets, onscreen_sets = [], {}, {}
 
-    sectors: dict[str, str] = {}
-    with ThreadPoolExecutor(max_workers=SECTOR_WORKERS) as pool:
-        for t, sec in tqdm(pool.map(one, tickers), total=len(tickers), desc="Sectors"):
-            sectors[t] = sec
-    return sectors
+    def trailing(sets: dict[str, set[str]], sym: str) -> int:
+        n = 0
+        for d in reversed(prior_dates):
+            if sym in sets.get(d, ()):
+                n += 1
+            else:
+                break
+        return n
+
+    result: dict[str, tuple[int, int, str]] = {}
+    for sym in breakout_syms | near_syms:
+        days_near = 1 + trailing(onscreen_sets, sym)
+        if sym in breakout_syms:
+            bs = 1 + trailing(breakout_sets, sym)
+            start = run_date if bs <= 1 else prior_dates[len(prior_dates) - (bs - 1)]
+        else:
+            bs, start = 0, ""
+        result[sym] = (bs, days_near, start)
+    return result
 
 
-def add_sector_column(df: pd.DataFrame, sectors: dict[str, str]) -> pd.DataFrame:
-    """Append a Sector column joined by ticker (the frame index)."""
-    if df.empty:
-        return df
+def add_streaks(df: pd.DataFrame, streaks: dict[str, tuple[int, int, str]]) -> pd.DataFrame:
     df = df.copy()
-    df["Sector"] = [sectors.get(str(sym), "") for sym in df.index]
+    for i, col in enumerate(STREAK_COLUMNS):
+        df[col] = df["Symbol"].map(lambda s: streaks[s][i]) if not df.empty else []
     return df
 
 
-def write_to_sheet(sheet_id: str, n_screened: int,
-                   breakouts: pd.DataFrame, near: pd.DataFrame) -> str:
+def fetch_meta(tickers: list[str]) -> dict[str, dict]:
+    """Resolve Sector + Market Cap per ticker via yfinance (threaded, one call each).
+
+    Sector uses the granular `industry`, falling back to the broad `sector`.
+    Failures are non-fatal: an unresolved ticker gets a blank sector / None cap
+    so a slow or rate-limited lookup never blocks the screen.
+    """
+    def one(t: str) -> tuple[str, dict]:
+        try:
+            info = yf.Ticker(t).info
+            return t, {
+                "Sector": info.get("industry") or info.get("sector") or "",
+                "Market Cap": info.get("marketCap"),
+            }
+        except Exception:
+            return t, {"Sector": "", "Market Cap": None}
+
+    meta: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=SECTOR_WORKERS) as pool:
+        for t, m in tqdm(pool.map(one, tickers), total=len(tickers), desc="Meta"):
+            meta[t] = m
+    return meta
+
+
+def add_meta(df: pd.DataFrame, meta: dict[str, dict]) -> pd.DataFrame:
+    df = df.copy()
+    for col in META_COLUMNS:
+        default = "" if col == "Sector" else None
+        df[col] = df["Symbol"].map(lambda s: meta.get(s, {}).get(col, default)) if not df.empty else []
+    return df.reindex(columns=RESULT_COLUMNS)
+
+
+# --- Google Sheets I/O --------------------------------------------------------
+
+def open_sheet(sheet_id: str):
     import gspread
     from google.oauth2.service_account import Credentials
 
@@ -155,46 +269,71 @@ def write_to_sheet(sheet_id: str, n_screened: int,
     if not raw:
         raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON env var not set")
     creds = Credentials.from_service_account_info(json.loads(raw), scopes=GOOGLE_SCOPES)
-    sh = gspread.authorize(creds).open_by_key(sheet_id)
+    return gspread.authorize(creds).open_by_key(sheet_id)
 
-    def get_or_create(title: str):
-        try:
-            return sh.worksheet(title)
-        except gspread.WorksheetNotFound:
-            return sh.add_worksheet(title=title, rows="100", cols="10")
 
-    def write(title: str, rows: list[list]):
-        # Clear ONLY columns A..last_col so user-added formulas in columns
-        # beyond last_col are preserved across runs. Resize the worksheet
-        # to exactly fit the data so user formula columns past the script's
-        # range don't show N/A on phantom rows.
-        ws = get_or_create(title)
-        n_rows = len(rows)
-        n_cols = len(rows[0])
-        last_col = chr(ord("A") + n_cols - 1)
-        ws.resize(rows=max(n_rows, 1))
-        ws.batch_clear([f"A:{last_col}"])
-        ws.update(values=rows, range_name=f"A1:{last_col}{n_rows}")
+def _get_or_create(sh, title: str, rows: int = 100, cols: int = 20):
+    import gspread
+    try:
+        return sh.worksheet(title)
+    except gspread.WorksheetNotFound:
+        return sh.add_worksheet(title=title, rows=str(rows), cols=str(cols))
 
-    def table_rows(df: pd.DataFrame) -> list[list]:
-        header = ["Symbol", "Price", "52-Week High", "Distance to High (%)",
-                  "Volume Ratio", "Sector"]
+
+def read_history(sh) -> pd.DataFrame:
+    """Read the History tab into a DataFrame (empty if the tab is absent/empty)."""
+    import gspread
+    try:
+        ws = sh.worksheet("History")
+    except gspread.WorksheetNotFound:
+        return pd.DataFrame(columns=HISTORY_COLUMNS)
+    values = ws.get_all_values()
+    if len(values) < 2:
+        return pd.DataFrame(columns=HISTORY_COLUMNS)
+    return pd.DataFrame(values[1:], columns=values[0])
+
+
+def write_results(sh, n_screened: int, breakouts: pd.DataFrame,
+                  near: pd.DataFrame, last_run: str) -> None:
+    from gspread_dataframe import set_with_dataframe
+
+    def write_df(title: str, df: pd.DataFrame):
+        # The script owns the whole sheet, so a full clear + one write is safe.
+        # set_with_dataframe resizes the worksheet to fit the frame exactly.
+        ws = _get_or_create(sh, title)
+        ws.clear()
+        set_with_dataframe(ws, df, include_index=False,
+                           include_column_header=True, resize=True)
+
+    summary = pd.DataFrame(
+        [["Universe", "NASDAQ"], ["Last Run", last_run],
+         ["Tickers Screened", n_screened], ["Breakouts", len(breakouts)],
+         ["Near Breakouts", len(near)]],
+        columns=["Field", "Value"])
+    write_df("Summary", summary)
+    write_df("Breakouts", breakouts)
+    write_df("Near Breakouts", near)
+
+
+def append_history(sh, breakouts: pd.DataFrame, near: pd.DataFrame, run_date: str) -> None:
+    """Append today's rows to the append-only History log (feeds the streak calc)."""
+    def tagged(df: pd.DataFrame, label: str) -> pd.DataFrame:
         if df.empty:
-            return [header, ["(none)"] + [""] * (len(header) - 1)]
-        return [header] + [[idx] + list(row) for idx, row in df.iterrows()]
+            return pd.DataFrame(columns=HISTORY_COLUMNS)
+        out = df.copy()
+        out.insert(0, "List", label)
+        out.insert(0, "Date", run_date)
+        return out.reindex(columns=HISTORY_COLUMNS)
 
-    last_run = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    write("Summary", [
-        ["Field", "Value"],
-        ["Universe", "NASDAQ"],
-        ["Last Run", last_run],
-        ["Tickers Screened", n_screened],
-        ["Breakouts", len(breakouts)],
-        ["Near Breakouts", len(near)],
-    ])
-    write("Breakouts", table_rows(breakouts))
-    write("Near Breakouts", table_rows(near))
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+    combined = pd.concat([tagged(breakouts, "Breakout"), tagged(near, "Near")],
+                         ignore_index=True)
+    if combined.empty:
+        return
+    hist = _get_or_create(sh, "History", rows=2000, cols=len(HISTORY_COLUMNS))
+    if not hist.get_all_values():
+        hist.append_row(HISTORY_COLUMNS, value_input_option="RAW")
+    rows = combined.where(pd.notna(combined), "").values.tolist()
+    hist.append_rows(rows, value_input_option="RAW")
 
 
 def main() -> int:
@@ -218,14 +357,32 @@ def main() -> int:
     breakouts, near = compute_signals(raw)
     print(f"Breakouts: {len(breakouts)} | Near Breakouts: {len(near)}")
 
-    # Sectors are only needed for the result rows, not the whole universe.
-    result_tickers = sorted(set(breakouts.index) | set(near.index))
-    sectors = fetch_sectors(result_tickers)
-    print(f"Sectors resolved: {sum(1 for v in sectors.values() if v)}/{len(result_tickers)}")
-    breakouts = add_sector_column(breakouts, sectors)
-    near = add_sector_column(near, sectors)
+    now = _now()
+    run_date = now.strftime("%Y-%m-%d")
+    last_run = now.strftime("%Y-%m-%d %H:%M UTC")
 
-    url = write_to_sheet(sheet_id, len(raw), breakouts, near)
+    # Streaks come from the stored History rows, so read the sheet first.
+    sh = open_sheet(sheet_id)
+    history = read_history(sh)
+    streaks = compute_streaks(history, set(breakouts["Symbol"]),
+                              set(near["Symbol"]), run_date)
+    breakouts = add_streaks(breakouts, streaks)
+    near = add_streaks(near, streaks)
+
+    # Metadata is only needed for the result rows, not the whole universe.
+    result_tickers = sorted(set(breakouts["Symbol"]) | set(near["Symbol"]))
+    meta = fetch_meta(result_tickers)
+    print(f"Sectors resolved: {sum(1 for m in meta.values() if m['Sector'])}/{len(result_tickers)}")
+    breakouts = add_meta(breakouts, meta)
+    near = add_meta(near, meta)
+
+    breakouts = breakouts.sort_values(
+        ["Breakout Streak", "Distance to High (%)"], ascending=[False, True])
+    near = near.sort_values("Distance to High (%)")
+
+    write_results(sh, len(raw), breakouts, near, last_run)
+    append_history(sh, breakouts, near, run_date)
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
     print(f"Wrote results to {url}")
     return 0
 
