@@ -113,6 +113,58 @@
   footer { margin-top: 26px; color: var(--faint); font-size: 12.5px; line-height: 1.7; }
   footer a { color: var(--muted); }
   .err { padding: 40px; text-align: center; color: var(--muted); }
+  .ext { color: var(--muted); text-decoration: none; font-size: 15px; }
+  .ext:hover { color: var(--blue); }
+
+  /* ---------- detail panel ---------- */
+  #overlay {
+    position: fixed; inset: 0; background: rgba(4,6,10,.72); z-index: 50;
+    display: flex; justify-content: center; align-items: flex-start;
+    padding: 4vh 16px; overflow-y: auto; backdrop-filter: blur(3px);
+  }
+  #overlay[hidden] { display: none; }
+  .panel {
+    background: var(--bg); border: 1px solid var(--card-border); border-radius: 16px;
+    width: 100%; max-width: 980px; padding: 22px 24px 26px; position: relative;
+  }
+  .panel .close {
+    position: absolute; top: 14px; right: 14px; width: 34px; height: 34px;
+    border-radius: 10px; border: 1px solid var(--card-border); background: var(--card);
+    color: var(--muted); font-size: 16px; cursor: pointer;
+  }
+  .panel .close:hover { color: var(--text); background: var(--hover); }
+  .p-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 4px; }
+  .p-head .logo, .p-head .logo-fb { width: 44px; height: 44px; font-size: 18px; }
+  .p-title { font-size: 20px; font-weight: 800; }
+  .p-title a { color: var(--text); text-decoration: none; }
+  .p-title a:hover { color: var(--blue); }
+  .p-name { color: var(--muted); font-size: 13.5px; max-width: 520px; }
+  .p-price { margin-left: auto; text-align: right; }
+  .p-price .v { font-size: 22px; font-weight: 800; }
+  .p-price .c { font-size: 13px; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 16px; }
+  .chip { background: var(--card); border: 1px solid var(--card-border); color: var(--muted);
+    border-radius: 999px; padding: 3px 11px; font-size: 12px; font-weight: 600; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px; margin-bottom: 16px; }
+  .stat { background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 10px; padding: 10px 12px; }
+  .stat .k { color: var(--muted); font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .05em; }
+  .stat .v { font-size: 17px; font-weight: 700; margin-top: 3px; }
+  .stat .v small { color: var(--muted); font-weight: 500; font-size: 11.5px; }
+  .sect { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .06em; margin: 18px 0 8px; }
+  .trailbox { background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 12px; padding: 14px 16px; }
+  .trailbox svg { display: block; width: 100%; height: 120px; }
+  .trailbox .cap { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .frame { border: 1px solid var(--card-border); border-radius: 12px; overflow: hidden;
+    background: var(--card); }
+  .frame iframe { display: block; width: 100%; border: 0; }
+  .duo { display: grid; grid-template-columns: 1.4fr 1fr; gap: 12px; }
+  @media (max-width: 760px) { .duo { grid-template-columns: 1fr; }
+    .panel { padding: 16px; } }
 </style>
 </head>
 <body>
@@ -145,6 +197,8 @@
     </table>
   </div>
   <button class="more" id="more" hidden></button>
+
+  <div id="overlay" hidden><div class="panel" id="panel"></div></div>
 
   <footer>
     Breakout = within <span id="f-bp"></span>% of the 52-week high with volume &gt; <span id="f-vt"></span>× its 10-day average ·
@@ -210,6 +264,9 @@ const COLUMNS = [
   { label: 'Sector', left: true, sort: r => r.sector, render: r =>
       `<span title="${esc(r.industry)}">${esc(r.sector) || '–'}</span>` },
   { label: 'Country', left: true, sort: r => r.country, render: r => esc(r.country) || '–' },
+  { label: '', render: r =>
+      `<a class="ext" href="${tvUrl(r.ticker)}" target="_blank" rel="noopener"
+         title="Open in TradingView">↗</a>` },
 ];
 
 /* ---------- state ---------- */
@@ -302,6 +359,7 @@ $('tabs').addEventListener('click', e => {
 $('head').addEventListener('click', e => {
   const th = e.target.closest('th'); if (!th) return;
   const i = +th.dataset.i;
+  if (!COLUMNS[i].sort) return;
   if (state.sortCol === i) state.sortDir *= -1; else { state.sortCol = i; state.sortDir = 1; }
   renderTable();
 });
@@ -310,16 +368,150 @@ $('sector').addEventListener('change', e => { state.sector = e.target.value; sta
 $('country').addEventListener('change', e => { state.country = e.target.value; state.limit = PAGE; renderTable(); });
 $('more').addEventListener('click', () => { state.limit = Infinity; renderTable(); });
 $('body').addEventListener('click', e => {
-  if (e.target.closest('a')) return;            // symbol link handles itself
+  if (e.target.closest('a')) return;            // links handle themselves
   const tr = e.target.closest('tr[data-t]');
-  if (tr) window.open(tvUrl(tr.dataset.t), '_blank', 'noopener');
+  if (tr) openDetail(tr.dataset.t);
 });
+
+/* ---------- detail panel ---------- */
+let TRAILS = null;   // ticker -> [[run_date, B|N, dist, relvol], ...], lazy
+
+/* Some widgets read the symbol from the query string (symbol-profile), others
+   from the JSON fragment (technical-analysis) — supply both. */
+const widgetFrame = (name, symbol, height, extra = {}) => {
+  const cfg = encodeURIComponent(JSON.stringify({
+    symbol, width: '100%', height, colorTheme: 'dark', isTransparent: true,
+    ...extra }));
+  return `<iframe style="height:${height}px" loading="lazy"
+    src="https://www.tradingview-widget.com/embed-widget/${name}/?locale=en&symbol=${encodeURIComponent(symbol)}#${cfg}"></iframe>`;
+};
+
+function trailChart(trail) {
+  const w = 640, h = 120, pad = 16;
+  const dists = trail.map(e => e[2]).filter(v => v != null);
+  const maxD = Math.max(5, ...dists);
+  const x = i => trail.length === 1 ? w / 2 : pad + i / (trail.length - 1) * (w - 2 * pad);
+  const y = d => pad + (d / maxD) * (h - 2 * pad);
+  const pts = trail.map((e, i) => e[2] == null ? null : [x(i), y(e[2]), e]).filter(Boolean);
+  const line = pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+  const dots = pts.map(p => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="4"
+      fill="${p[2][1] === 'B' ? 'var(--amber)' : '#5b6274'}">
+      <title>${p[2][0]} · ${p[2][1] === 'B' ? 'Breakout' : 'Near'} · −${p[2][2]}% from high${p[2][3] != null ? ' · ' + p[2][3] + '× vol' : ''}</title>
+    </circle>`).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <line x1="${pad}" y1="${y(0)}" x2="${w - pad}" y2="${y(0)}" stroke="var(--green)"
+      stroke-dasharray="3 4" stroke-opacity=".5"/>
+    <text x="${pad}" y="${y(0) - 5}" fill="var(--muted)" font-size="9">52w high</text>
+    ${pts.length > 1 ? `<polyline points="${line}" fill="none" stroke="#3b4560" stroke-width="1.5"/>` : ''}
+    ${dots}</svg>`;
+}
+
+function trailSection(t, row) {
+  if (!TRAILS) return '<div class="cap">Loading history…</div>';
+  const trail = TRAILS[t];
+  if (!trail || !trail.length)
+    return '<div class="cap">No stored appearances for this ticker yet — history accrues one run per trading day.</div>';
+  const nB = trail.filter(e => e[1] === 'B').length;
+  return trailChart(trail) + `<div class="cap">
+    Dot per run on screen (🟡 breakout · ⚪ near), higher = closer to the 52-week high ·
+    ${trail.length} appearance${trail.length > 1 ? 's' : ''} since ${trail[0][0]},
+    ${nB} as breakout${row.streak > 1 ? ` · current streak ${row.streak} sessions (since ${esc(row.streak_start)})` : ''}</div>`;
+}
+
+function findRow(t) {
+  return DATA.breakouts.find(r => r.ticker === t) || DATA.near.find(r => r.ticker === t);
+}
+
+function openDetail(t) {
+  const r = findRow(t);
+  if (!r) return;
+  const sym = encodeURIComponent(t);
+  const logo = r.logoid
+    ? `<img class="logo" src="${logoUrl(r.logoid)}" alt=""
+         onerror="this.replaceWith(Object.assign(document.createElement('span'),
+         {className:'logo-fb',textContent:'${esc(r.symbol[0])}'}))">`
+    : `<span class="logo-fb">${esc(r.symbol[0])}</span>`;
+  const stale = r.session_date !== DATA.run_date
+    ? `<span class="chip" style="color:var(--amber)">last session ${esc(r.session_date)}</span>` : '';
+  const streakStat = r.streak > 0
+    ? `${r.streak} <small>session${r.streak > 1 ? 's' : ''}${r.streak > 1 ? ' · since ' + esc(r.streak_start) : ' · NEW'}</small>`
+    : `– <small>on Near list</small>`;
+
+  $('panel').innerHTML = `
+    <button class="close" id="p-close" title="Close (Esc)">✕</button>
+    <div class="p-head">
+      ${logo}
+      <div>
+        <div class="p-title"><a href="${tvUrl(t)}" target="_blank" rel="noopener">${esc(r.symbol)}</a>
+          <span style="color:var(--faint);font-weight:500;font-size:13px"> ${esc(t)}</span></div>
+        <div class="p-name">${esc(r.name)}</div>
+      </div>
+      <div class="p-price">
+        <div class="v">${fmtPrice(r.price, r.currency)}</div>
+        <div class="c ${r.change >= 0 ? 'up' : 'down'}">${r.change == null ? '' : fmtPct(r.change) + ' today'}</div>
+      </div>
+    </div>
+    <div class="chips">
+      <span class="chip">${esc(r.sector) || 'Unknown sector'}</span>
+      ${r.industry ? `<span class="chip">${esc(r.industry)}</span>` : ''}
+      <span class="chip">${esc(r.country)}</span>
+      <span class="chip">${esc(r.exchange)}</span>
+      ${stale}
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">From 52w high</div>
+        <div class="v">${r.dist_pct <= 0 ? 'At high' : '−' + r.dist_pct.toFixed(2) + '%'}
+        <small>high ${fmtPrice(r.high_52w, r.currency)}</small></div></div>
+      <div class="stat"><div class="k">Rel volume (10d)</div>
+        <div class="v">${r.rel_volume == null ? '–' : r.rel_volume.toFixed(2) + '×'}</div></div>
+      <div class="stat"><div class="k">Breakout streak</div><div class="v">${streakStat}</div></div>
+      <div class="stat"><div class="k">On screen</div>
+        <div class="v">${r.days_near} <small>session${r.days_near > 1 ? 's' : ''}</small></div></div>
+      <div class="stat"><div class="k">Market cap</div><div class="v">${fmtCap(r.mcap)}</div></div>
+    </div>
+    <div class="sect">Breakout history</div>
+    <div class="trailbox" id="trailbox">${trailSection(t, r)}</div>
+    <div class="sect">Price chart</div>
+    <div class="frame"><iframe style="height:460px" loading="lazy"
+      src="https://s.tradingview.com/widgetembed/?symbol=${sym}&interval=D&theme=dark&style=1&locale=en&hide_side_toolbar=1&allow_symbol_change=0&withdateranges=1&hideideas=1&toolbarbg=131722"></iframe></div>
+    <div class="sect">Company & technicals</div>
+    <div class="duo">
+      <div class="frame">${widgetFrame('symbol-profile', t, 340)}</div>
+      <div class="frame">${widgetFrame('technical-analysis', t, 340, { interval: '1D', showIntervalTabs: true })}</div>
+    </div>`;
+
+  $('overlay').hidden = false;
+  document.body.style.overflow = 'hidden';
+  $('p-close').addEventListener('click', closeDetail);
+  history.replaceState(null, '', location.pathname + '?t=' + encodeURIComponent(t) + location.hash);
+
+  if (!TRAILS) {
+    getJSON('trails.json')
+      .then(d => { TRAILS = d; })
+      .catch(() => { TRAILS = {}; })
+      .finally(() => {
+        const box = document.getElementById('trailbox');
+        if (box) box.innerHTML = trailSection(t, r);
+      });
+  }
+}
+
+function closeDetail() {
+  $('overlay').hidden = true;
+  $('panel').innerHTML = '';
+  document.body.style.overflow = '';
+  history.replaceState(null, '', location.pathname + location.hash);
+}
+$('overlay').addEventListener('click', e => { if (e.target.id === 'overlay') closeDetail(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('overlay').hidden) closeDetail(); });
 
 /* ---------- date navigation + boot ---------- */
 let DATES = [];   // available run dates, oldest -> newest
 
 const getJSON = url => fetch(url + '?v=' + Date.now())
   .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+
+let PENDING_T = new URLSearchParams(location.search).get('t');
 
 function applyData(d) {
   DATA = d;
@@ -335,6 +527,7 @@ function applyData(d) {
   fillSelect('sector', 'sector', 'All sectors');
   fillSelect('country', 'country', 'All countries');
   renderCards(); renderTabs(); renderTable();
+  if (PENDING_T) { const t = PENDING_T; PENDING_T = null; openDetail(t); }
 }
 
 function renderDateNav(date) {

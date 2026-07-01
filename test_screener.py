@@ -141,3 +141,14 @@ def test_update_history_prunes_old_runs(monkeypatch):
     assert sorted(out['run_date'].unique()) == ['2026-06-30', RUN]
 
 
+def test_build_trails_covers_screen_tickers_only_oldest_first():
+    from screener import build_trails
+    h = hist([('2026-06-30', '2026-06-30', 'Near', 'A'),
+              (RUN, RUN, 'Breakout', 'A'),
+              (RUN, RUN, 'Near', 'GONE')])   # not on today's screen
+    trails = build_trails(h, today_frame([('A', 'Breakout', RUN)]))
+    assert set(trails) == {'A'}
+    assert [(e[0], e[1]) for e in trails['A']] == [('2026-06-30', 'N'), (RUN, 'B')]
+    assert trails['A'][0][2] == 0.1 and trails['A'][0][3] == 2.0
+
+

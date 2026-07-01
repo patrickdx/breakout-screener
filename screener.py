@@ -35,6 +35,7 @@ MIN_MARKET_CAP = 2_000_000_000   # USD
 HISTORY_MAX_RUNS = 500    # prune history beyond this many run dates
 ARCHIVE_MAX_RUNS = 120    # per-run JSON archives kept in docs/runs/
 TREND_RUNS = 90           # runs shown in the dashboard trend chart
+TRAIL_RUNS = 40           # per-ticker appearance trail for the detail panel
 
 MARKETS = [
     # Americas
@@ -64,6 +65,7 @@ ROOT = Path(__file__).resolve().parent
 HISTORY_PATH = ROOT / 'data' / 'history.csv'
 DATA_JSON_PATH = ROOT / 'docs' / 'data.json'
 RUNS_DIR = ROOT / 'docs' / 'runs'
+TRAILS_PATH = ROOT / 'docs' / 'trails.json'
 
 
 def fetch() -> pd.DataFrame:
@@ -187,6 +189,25 @@ def update_history(history: pd.DataFrame, today: pd.DataFrame,
     return hist.sort_values(['run_date', 'list', 'ticker'], ignore_index=True)
 
 
+def build_trails(history: pd.DataFrame, today: pd.DataFrame) -> dict:
+    """Per-ticker appearance trail for the dashboard's detail panel.
+
+    {ticker: [[run_date, "B"|"N", dist_pct, rel_volume], ...]} — the last
+    TRAIL_RUNS rows for every ticker on today's screen, oldest first.
+    """
+    h = history[history['ticker'].isin(set(today['ticker']))]
+    trails: dict[str, list] = {}
+    for t, g in h.sort_values('run_date').groupby('ticker'):
+        g = g.tail(TRAIL_RUNS)
+        trails[t] = [
+            [r.run_date, 'B' if r.list == 'Breakout' else 'N',
+             None if pd.isna(r.dist_pct) else float(r.dist_pct),
+             None if pd.isna(r.rel_volume) else float(r.rel_volume)]
+            for r in g.itertuples()
+        ]
+    return trails
+
+
 def build_trend(history: pd.DataFrame) -> list[dict]:
     counts = (history.groupby(['run_date', 'list']).size()
               .unstack(fill_value=0).reindex(columns=['Breakout', 'Near'], fill_value=0))
@@ -262,6 +283,8 @@ def main() -> int:
                             now.strftime('%Y-%m-%d %H:%M UTC'))
     write_latest(payload)
     write_archive(payload)
+    TRAILS_PATH.write_text(json.dumps(build_trails(history, today),
+                                      separators=(',', ':')))
 
     n_b = int((today['list'] == 'Breakout').sum())
     stale = int((today['session_date'] != run_date).sum())

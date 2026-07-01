@@ -26,8 +26,11 @@ runs [`screener.py`](screener.py):
 
 **The repo is the data store.** No database, no server, no secrets. The
 dashboard's date picker cycles through the archived runs (one per trading
-day, kept for the last `ARCHIVE_MAX_RUNS` = 120 runs); clicking a row opens
-the stock's TradingView chart.
+day, kept for the last `ARCHIVE_MAX_RUNS` = 120 runs). Clicking a row opens
+a detail panel: streak stats, an appearance-trail chart fed by
+`docs/trails.json`, and TradingView's embedded price chart, company profile
+and technicals gauge. Panels are deep-linkable (`?t=NASDAQ:AAPL`); the ↗
+column jumps straight to TradingView.
 
 ## Streaks
 
