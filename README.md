@@ -1,61 +1,75 @@
 # Breakout Screener
 
-Daily 52-week-high breakout screener for NASDAQ common stock. Results are
-published to a Google Sheet.
+Daily screener for global stocks trading near their 52-week high.
+Universe: every primary-listed common stock with **market cap > $2B** across
+**~45 markets** (US, Europe, Japan, China, India, …).
 
-## Architecture
+**Dashboard:** https://patrickdx.github.io/breakout-screener/
 
-Every weekday a GitHub Actions job runs [`momentum_update.py`](momentum_update.py):
+## How it works
 
-1. Builds the NASDAQ common-stock universe (drops ETFs, warrants, units, preferreds, …).
-2. Downloads ~1 year of daily bars per ticker via `yfinance`.
-3. Classifies each stock as a Breakout or Near-Breakout for today (pure pandas).
-4. Reads the **History** tab back and computes the streak from those stored rows.
-5. Writes the Summary / Breakouts / Near tabs and appends today's rows to History.
+Every weekday at 21:00 UTC (after the US close — Asia and Europe closed hours
+earlier, so it's one clean global end-of-day snapshot) a GitHub Actions job
+runs [`screener.py`](screener.py):
 
-**The sheet is the data store.** `Breakout Streak` is the number of *consecutive
-prior runs* a symbol has appeared on the Breakouts list, plus today — read from
-the History tab, not guessed from a single day. On the first ever run History is
-empty and every streak is `1`; it accrues from there. Because it counts
-consecutive *runs* (not calendar days), a skipped run doesn't reset it.
-`Days Near High` is the same idea across either list (on-screen at all), and
-`Streak Start` is the date the current breakout streak began.
+1. **One request** to TradingView's public scanner returns the whole filtered
+   universe — price, 52-week high, relative volume, sector, industry, market
+   cap (USD), country, currency, logo. No API key, no per-ticker downloads.
+2. Each stock is classified:
+   - **Breakout** — within **0.5%** of its 52-week high **and** volume > **1.2×**
+     its 10-day average.
+   - **Near Breakout** — within **5%** of the high.
+3. Streaks are computed from the stored history (see below), results are
+   written to `docs/data.json` and appended to `data/history.csv`, and the
+   job commits both. GitHub Pages serves [`docs/`](docs/) as the dashboard.
 
-Two lists:
-- **Breakouts** — within 0.5% of the 52-week high **and** volume > 1.2× the 50-day average.
-- **Near Breakouts** — within 5% of the high (no volume requirement).
+**The repo is the data store.** No database, no server, no secrets.
 
-## Sheet tabs
+## Streaks
 
-| Tab | Contents |
-|---|---|
-| Summary | Run metadata (universe, last run, counts) |
-| Breakouts | Today's breakouts, sorted by streak then distance |
-| Near Breakouts | Today's near-breakouts, sorted by distance |
-| History | Append-only dated log of every run, for trend analysis |
+`Breakout Streak` is real memory across runs, read back from
+`data/history.csv`:
 
-Result columns: `Symbol, Price, 52-Week High, Distance to High (%), Volume Ratio,
-Breakout Streak, Days Near High, Streak Start, Sector, Market Cap, Daily Change (%), Link`.
-`Link` is a Google Sheets `HYPERLINK` formula (Yahoo Finance by default — change
-`LINK_BASE` at the top of the script).
+- **Continuity** is counted in consecutive *runs* — a skipped run (CI outage)
+  doesn't reset a streak.
+- **Length** is counted in distinct exchange *sessions* — a run that re-serves
+  stale data (US holiday, same-day re-run) can never inflate a streak.
+- Re-running the job on the same day replaces that day's rows (idempotent).
 
-## Setup
+`Days on screen` is the same idea for appearing on either list; `streak_start`
+is the date the current breakout streak began. On the very first run every
+streak is 1; it accrues from there. History is pruned beyond
+`HISTORY_MAX_RUNS` (500) run dates.
 
-The job needs two GitHub Actions secrets:
-- `SHEET_ID` — the target spreadsheet's ID (the long string in its URL).
-- `GOOGLE_SERVICE_ACCOUNT_JSON` — a Google service-account key (JSON). Share the
-  sheet with the service account's email as an Editor.
+## Notes on the data
+
+- Prices are in each listing's **local currency**; market cap is normalized to
+  **USD** by TradingView. Don't sum the price column across countries.
+- Cross-listings are deduped to the primary listing (`is_primary`), so TSMC
+  shows up as `TWSE:2330`, not its US ADR.
+- The scanner endpoint is unofficial (same risk class as yfinance was) —
+  versions are pinned in `requirements.txt`; one query per day is far below
+  any rate limit.
+- A stale-session dot (●) on the dashboard marks rows whose exchange didn't
+  trade on the run date (e.g. a local holiday).
 
 ## Run locally
+
 ```bash
 pip install -r requirements.txt
-export SHEET_ID=...            # spreadsheet id
-export GOOGLE_SERVICE_ACCOUNT_JSON="$(cat service-account.json)"
-python momentum_update.py
+python screener.py          # writes data/history.csv + docs/data.json
+python -m http.server -d docs 8000   # view at http://localhost:8000
 ```
 
+Tests (pure logic, no network): `pip install pytest && pytest -q`.
+
 ## Tuning
-Thresholds are constants at the top of [`momentum_update.py`](momentum_update.py):
-`SOFT_BREAKOUT_PCT`, `PROXIMITY_THRESHOLD`, `VOLUME_THRESHOLD`, `LOOKBACK_DAYS`.
+
+Constants at the top of [`screener.py`](screener.py): `BREAKOUT_PCT`,
+`PROXIMITY_PCT`, `VOLUME_THRESHOLD`, `MIN_MARKET_CAP`, `MARKETS`.
+
+Adding a dashboard column: add the field to `FIELDS` in `screener.py`, carry
+it through `classify()`, and add one entry to `COLUMNS` in
+[`docs/index.html`](docs/index.html).
 
 Not investment advice.

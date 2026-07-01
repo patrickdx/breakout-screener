@@ -1,6 +1,2 @@
-yfinance
-pandas
-tqdm
-gspread
-google-auth
-gspread-dataframe
+tradingview-screener==3.2.1
+pandas==3.0.3

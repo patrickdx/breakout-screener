@@ -2,15 +2,23 @@ name: Daily Breakout Screener
 
 on:
   schedule:
-    # 21:00 UTC = 5pm EDT (summer) / 4pm EST (winter). GitHub Actions schedule
-    # lag may push actual run up to ~1h later.
+    # 21:00 UTC — after the US close; Asia and Europe closed hours earlier,
+    # so this is one clean global end-of-day snapshot. GitHub schedule lag
+    # may push the actual run up to ~1h later.
     - cron: '0 21 * * 1-5'
   workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener
+  cancel-in-progress: false
 
 jobs:
   run-screener:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -20,10 +28,23 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest
 
-      - name: Run breakout screener
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-        run: python momentum_update.py
+      - name: Run tests
+        run: pytest -q
+
+      - name: Run screener
+        run: python screener.py
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/history.csv docs/data.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Screener run: $(date -u +%F)"
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          exit 1
