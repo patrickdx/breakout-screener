@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Breakout Screener</title>
+<meta name="description" content="Global stocks within 5% of their 52-week high, >$2B market cap, updated daily.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0e14; --card: #12161f; --card-border: #1e2431;
+    --text: #e6e9ef; --muted: #8b93a7; --faint: #5b6274;
+    --green: #34d399; --red: #f87171; --blue: #60a5fa; --amber: #fbbf24;
+    --hover: #171c27; --accent: #34d399;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: Inter, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 28px 20px 60px; }
+
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 16px; margin-bottom: 6px; }
+  h1 { font-size: 22px; font-weight: 800; margin: 0; letter-spacing: -0.02em; }
+  h1 .dot { color: var(--accent); }
+  .updated { color: var(--muted); font-size: 13px; }
+  .sub { color: var(--muted); margin: 0 0 22px; font-size: 13.5px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 22px; }
+  .card {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 12px; padding: 14px 16px; min-height: 86px;
+  }
+  .card .k { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+  .card .v { font-size: 26px; font-weight: 800; margin-top: 6px; letter-spacing: -0.02em; }
+  .card .s { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .card .s b { color: var(--blue); }
+  .card svg { display: block; width: 100%; height: 44px; margin-top: 6px; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+  .tabs { display: flex; background: var(--card); border: 1px solid var(--card-border); border-radius: 10px; padding: 3px; }
+  .tabs button {
+    border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 600;
+    padding: 7px 14px; border-radius: 8px; cursor: pointer;
+  }
+  .tabs button.active { background: #1d2431; color: var(--text); }
+  input[type=search], select {
+    background: var(--card); border: 1px solid var(--card-border); color: var(--text);
+    border-radius: 10px; padding: 8px 12px; font: inherit; outline: none;
+  }
+  input[type=search] { flex: 1; min-width: 160px; }
+  input[type=search]:focus, select:focus { border-color: #2e3850; }
+  .count { color: var(--muted); font-size: 13px; margin-left: auto; white-space: nowrap; }
+
+  .table-wrap { background: var(--card); border: 1px solid var(--card-border); border-radius: 12px; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 900px; }
+  thead th {
+    position: sticky; top: 0; background: var(--card); z-index: 1;
+    text-align: right; color: var(--muted); font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em; padding: 12px 14px;
+    border-bottom: 1px solid var(--card-border); cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  thead th:first-child, thead th.left { text-align: left; }
+  thead th .arrow { color: var(--accent); font-size: 10px; }
+  tbody td { padding: 10px 14px; border-bottom: 1px solid #161b26; text-align: right; white-space: nowrap; }
+  tbody td:first-child, tbody td.left { text-align: left; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: var(--hover); }
+
+  .sym { display: flex; align-items: center; gap: 10px; }
+  .logo, .logo-fb {
+    width: 26px; height: 26px; border-radius: 50%; flex: none;
+    background: #fff;
+  }
+  .logo-fb {
+    display: flex; align-items: center; justify-content: center;
+    background: #232a3a; color: var(--muted); font-weight: 700; font-size: 12px;
+  }
+  .sym a { color: var(--text); font-weight: 700; text-decoration: none; }
+  .sym a:hover { color: var(--blue); }
+  .sym .nm { color: var(--muted); font-size: 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+  .ccy { color: var(--faint); font-size: 11px; margin-left: 4px; }
+  .stale { color: var(--amber); cursor: help; }
+  .up { color: var(--green); } .down { color: var(--red); }
+
+  .dist { display: inline-flex; align-items: center; gap: 8px; }
+  .bar { width: 52px; height: 4px; background: #232a3a; border-radius: 2px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+
+  .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 700;
+  }
+  .pill.new { background: rgba(96,165,250,.15); color: var(--blue); }
+  .pill.streak { background: rgba(251,191,36,.13); color: var(--amber); }
+  .pill.plain { background: #1d2431; color: var(--muted); }
+
+  .more { display: block; margin: 0 auto; padding: 10px 22px; margin-top: 16px;
+    background: var(--card); border: 1px solid var(--card-border); color: var(--text);
+    border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer; }
+  .more:hover { background: var(--hover); }
+
+  footer { margin-top: 26px; color: var(--faint); font-size: 12.5px; line-height: 1.7; }
+  footer a { color: var(--muted); }
+  .err { padding: 40px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Breakout Screener<span class="dot">.</span></h1>
+    <span class="updated" id="updated"></span>
+  </header>
+  <p class="sub" id="subtitle"></p>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="controls">
+    <div class="tabs" id="tabs"></div>
+    <input type="search" id="q" placeholder="Search symbol or company…">
+    <select id="sector"><option value="">All sectors</option></select>
+    <select id="country"><option value="">All countries</option></select>
+    <span class="count" id="count"></span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr id="head"></tr></thead>
+      <tbody id="body"><tr><td class="err">Loading…</td></tr></tbody>
+    </table>
+  </div>
+  <button class="more" id="more" hidden></button>
+
+  <footer>
+    Breakout = within <span id="f-bp"></span>% of the 52-week high with volume &gt; <span id="f-vt"></span>× its 10-day average ·
+    Near = within <span id="f-pp"></span>% of the high · Streaks count distinct exchange sessions on the list.<br>
+    Prices in local currency; market cap in USD. Data via TradingView's public scanner, updated each weekday after US close.
+    Not investment advice. <a href="https://github.com/patrickdx/breakout-screener">Source on GitHub</a>.
+  </footer>
+</div>
+
+<script>
+'use strict';
+
+/* ---------- formatting helpers ---------- */
+const fmtCap = v => v >= 1e12 ? '$' + (v / 1e12).toFixed(2) + 'T'
+                  : v >= 1e9  ? '$' + (v / 1e9).toFixed(1)  + 'B'
+                  : '$' + Math.round(v / 1e6) + 'M';
+const fmtPrice = (v, ccy) => {
+  try {
+    return new Intl.NumberFormat('en', { style: 'currency', currency: ccy,
+      maximumFractionDigits: v < 10 ? 3 : 2 }).format(v);
+  } catch { return v.toLocaleString() + ' ' + ccy; }
+};
+const fmtPct = v => (v > 0 ? '+' : '') + v.toFixed(2) + '%';
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+const tvUrl = t => 'https://www.tradingview.com/chart/?symbol=' + encodeURIComponent(t);
+const logoUrl = id => 'https://s3-symbol-logo.tradingview.com/' + id + '.svg';
+
+/* ---------- columns: add a future column by adding one entry ---------- */
+/* render(row, ctx) -> cell HTML; sort -> value used when the header is clicked */
+const COLUMNS = [
+  { label: 'Symbol', left: true, sort: r => r.symbol, render: (r) => {
+      const logo = r.logoid
+        ? `<img class="logo" loading="lazy" src="${logoUrl(r.logoid)}" alt=""
+             onerror="this.replaceWith(Object.assign(document.createElement('span'),
+             {className:'logo-fb',textContent:'${esc(r.symbol[0])}'}))">`
+        : `<span class="logo-fb">${esc(r.symbol[0])}</span>`;
+      return `<div class="sym">${logo}<div>
+        <a href="${tvUrl(r.ticker)}" target="_blank" rel="noopener">${esc(r.symbol)}</a>
+        <div class="nm" title="${esc(r.name)}">${esc(r.name)}</div></div></div>`;
+    } },
+  { label: 'Price', sort: r => r.price, render: (r, ctx) => {
+      const stale = r.session_date !== ctx.run_date
+        ? ` <span class="stale" title="Last session: ${r.session_date} (market closed on run date)">●</span>` : '';
+      return fmtPrice(r.price, r.currency) + `<span class="ccy">${esc(r.currency)}</span>` + stale;
+    } },
+  { label: 'Day', sort: r => r.change, render: r =>
+      r.change == null ? '–' : `<span class="${r.change >= 0 ? 'up' : 'down'}">${fmtPct(r.change)}</span>` },
+  { label: 'To High', sort: r => -r.dist_pct, render: (r, ctx) => {
+      const fill = Math.max(0, Math.min(100, 100 * (1 - r.dist_pct / ctx.proximity)));
+      const label = r.dist_pct <= 0 ? 'at high' : '−' + r.dist_pct.toFixed(2) + '%';
+      return `<span class="dist"><span class="bar"><i style="width:${fill}%"></i></span>${label}</span>`;
+    } },
+  { label: 'Rel Vol', sort: r => r.rel_volume ?? -1, render: r =>
+      r.rel_volume == null ? '–' : r.rel_volume.toFixed(2) + '×' },
+  { label: 'Streak', sort: r => r.streak || r.days_near, render: (r, ctx) => {
+      if (ctx.tab === 'near')
+        return `<span class="pill plain">${r.days_near}d</span>`;
+      if (r.streak === 1) return '<span class="pill new">NEW</span>';
+      return `<span class="pill streak" title="Breakout since ${esc(r.streak_start)}">🔥 ${r.streak}</span>`;
+    } },
+  { label: 'Mkt Cap', sort: r => r.mcap, render: r => fmtCap(r.mcap) },
+  { label: 'Sector', left: true, sort: r => r.sector, render: r =>
+      `<span title="${esc(r.industry)}">${esc(r.sector) || '–'}</span>` },
+  { label: 'Country', left: true, sort: r => r.country, render: r => esc(r.country) || '–' },
+];
+
+/* ---------- state ---------- */
+const PAGE = 100;
+let DATA = null;
+let state = { tab: 'breakouts', q: '', sector: '', country: '', sortCol: null, sortDir: 1, limit: PAGE };
+const $ = id => document.getElementById(id);
+
+/* ---------- rendering ---------- */
+function sparkline(trend) {
+  const vals = trend.map(t => t.b);
+  const w = 220, h = 44, max = Math.max(...vals, 1);
+  if (vals.length === 1) vals.push(vals[0]);
+  const pts = vals.map((v, i) => [i / (vals.length - 1) * w, h - 4 - v / max * (h - 10)]);
+  const line = pts.map(p => p.map(n => n.toFixed(1)).join(',')).join(' ');
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <polyline points="${line} ${w},${h} 0,${h}" fill="rgba(52,211,153,.09)" stroke="none"/>
+    <polyline points="${line}" fill="none" stroke="var(--green)" stroke-width="2" stroke-linejoin="round"/></svg>`;
+}
+
+function renderCards() {
+  const s = DATA.stats;
+  $('cards').innerHTML = `
+    <div class="card"><div class="k">Breakouts</div><div class="v">${s.breakouts}</div>
+      <div class="s"><b>${s.new_breakouts} new</b> today</div></div>
+    <div class="card"><div class="k">Near breakouts</div><div class="v">${s.near}</div>
+      <div class="s">within ${DATA.params.proximity_pct}% of 52w high</div></div>
+    <div class="card"><div class="k">Countries</div><div class="v">${s.countries}</div>
+      <div class="s">${s.matches} stocks &gt; ${fmtCap(DATA.params.min_market_cap)}</div></div>
+    <div class="card"><div class="k">Breakouts · last ${DATA.trend.length} runs</div>${sparkline(DATA.trend)}</div>`;
+}
+
+function rows() {
+  const src = DATA[state.tab];
+  const q = state.q.toLowerCase();
+  let out = src.filter(r =>
+    (!q || r.symbol.toLowerCase().includes(q) || (r.name || '').toLowerCase().includes(q)) &&
+    (!state.sector || r.sector === state.sector) &&
+    (!state.country || r.country === state.country));
+  if (state.sortCol != null) {
+    const col = COLUMNS[state.sortCol];
+    out = [...out].sort((a, b) => {
+      const x = col.sort(a), y = col.sort(b);
+      return (x < y ? -1 : x > y ? 1 : 0) * state.sortDir;
+    });
+  }
+  return out;
+}
+
+function renderTable() {
+  const ctx = { tab: state.tab, run_date: DATA.run_date, proximity: DATA.params.proximity_pct };
+  $('head').innerHTML = COLUMNS.map((c, i) => {
+    const label = c.label === 'Streak' && state.tab === 'near' ? 'On screen' : c.label;
+    const arrow = state.sortCol === i ? ` <span class="arrow">${state.sortDir > 0 ? '▲' : '▼'}</span>` : '';
+    return `<th class="${c.left ? 'left' : ''}" data-i="${i}">${label}${arrow}</th>`;
+  }).join('');
+
+  const all = rows();
+  const shown = all.slice(0, state.limit);
+  $('body').innerHTML = shown.length
+    ? shown.map(r => `<tr>${COLUMNS.map(c =>
+        `<td class="${c.left ? 'left' : ''}">${c.render(r, ctx)}</td>`).join('')}</tr>`).join('')
+    : `<tr><td class="err" colspan="${COLUMNS.length}">No matches — market's quiet or your filters are strict.</td></tr>`;
+  $('count').textContent = `${all.length} stocks`;
+  const more = $('more');
+  more.hidden = all.length <= state.limit;
+  more.textContent = `Show all ${all.length}`;
+}
+
+function renderTabs() {
+  $('tabs').innerHTML = [
+    ['breakouts', `Breakouts (${DATA.stats.breakouts})`],
+    ['near', `Near (${DATA.stats.near})`],
+  ].map(([id, label]) =>
+    `<button class="${state.tab === id ? 'active' : ''}" data-tab="${id}">${label}</button>`).join('');
+}
+
+function fillSelect(id, key) {
+  const vals = [...new Set([...DATA.breakouts, ...DATA.near].map(r => r[key]).filter(Boolean))].sort();
+  $(id).innerHTML += vals.map(v => `<option>${esc(v)}</option>`).join('');
+}
+
+/* ---------- events ---------- */
+$('tabs').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.tab = b.dataset.tab; state.sortCol = null; state.limit = PAGE;
+  renderTabs(); renderTable();
+});
+$('head').addEventListener('click', e => {
+  const th = e.target.closest('th'); if (!th) return;
+  const i = +th.dataset.i;
+  if (state.sortCol === i) state.sortDir *= -1; else { state.sortCol = i; state.sortDir = 1; }
+  renderTable();
+});
+$('q').addEventListener('input', e => { state.q = e.target.value; state.limit = PAGE; renderTable(); });
+$('sector').addEventListener('change', e => { state.sector = e.target.value; state.limit = PAGE; renderTable(); });
+$('country').addEventListener('change', e => { state.country = e.target.value; state.limit = PAGE; renderTable(); });
+$('more').addEventListener('click', () => { state.limit = Infinity; renderTable(); });
+
+/* ---------- boot ---------- */
+fetch('data.json?v=' + Date.now())
+  .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+  .then(d => {
+    DATA = d;
+    $('updated').textContent = 'Updated ' + d.generated_utc;
+    $('subtitle').textContent =
+      `Global stocks within ${d.params.proximity_pct}% of their 52-week high · ` +
+      `market cap > ${fmtCap(d.params.min_market_cap)} · ${d.params.markets} markets, updated daily`;
+    $('f-bp').textContent = d.params.breakout_pct;
+    $('f-vt').textContent = d.params.volume_threshold;
+    $('f-pp').textContent = d.params.proximity_pct;
+    fillSelect('sector', 'sector'); fillSelect('country', 'country');
+    renderCards(); renderTabs(); renderTable();
+  })
+  .catch(err => {
+    $('body').innerHTML = `<tr><td class="err">Couldn't load data.json (${esc(err.message)}).
+      If this is a fresh deploy, wait for the first screener run.</td></tr>`;
+  });
+</script>
+</body>
+</html>
