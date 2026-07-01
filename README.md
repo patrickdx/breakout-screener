@@ -20,10 +20,14 @@ runs [`screener.py`](screener.py):
      its 10-day average.
    - **Near Breakout** — within **5%** of the high.
 3. Streaks are computed from the stored history (see below), results are
-   written to `docs/data.json` and appended to `data/history.csv`, and the
-   job commits both. GitHub Pages serves [`docs/`](docs/) as the dashboard.
+   written to `docs/data.json`, archived to `docs/runs/<date>.json`, and
+   appended to `data/history.csv`; the job commits everything. GitHub Pages
+   serves [`docs/`](docs/) as the dashboard.
 
-**The repo is the data store.** No database, no server, no secrets.
+**The repo is the data store.** No database, no server, no secrets. The
+dashboard's date picker cycles through the archived runs (one per trading
+day, kept for the last `ARCHIVE_MAX_RUNS` = 120 runs); clicking a row opens
+the stock's TradingView chart.
 
 ## Streaks
 

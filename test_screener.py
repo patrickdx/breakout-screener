@@ -139,3 +139,5 @@ def test_update_history_prunes_old_runs(monkeypatch):
               ('2026-06-30', '2026-06-30', 'Breakout', 'A')])
     out = screener.update_history(h, today_frame([('A', 'Breakout', RUN)]), RUN)
     assert sorted(out['run_date'].unique()) == ['2026-06-30', RUN]
+
+

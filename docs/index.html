@@ -46,6 +46,13 @@
     padding: 7px 14px; border-radius: 8px; cursor: pointer;
   }
   .tabs button.active { background: #1d2431; color: var(--text); }
+  .datenav { display: flex; align-items: center; gap: 4px; }
+  .datenav button {
+    background: var(--card); border: 1px solid var(--card-border); color: var(--text);
+    border-radius: 10px; padding: 7px 12px; font: inherit; font-weight: 700; cursor: pointer;
+  }
+  .datenav button:disabled { color: var(--faint); cursor: default; }
+  .datenav button:not(:disabled):hover { background: var(--hover); }
   input[type=search], select {
     background: var(--card); border: 1px solid var(--card-border); color: var(--text);
     border-radius: 10px; padding: 8px 12px; font: inherit; outline: none;
@@ -67,6 +74,7 @@
   tbody td { padding: 10px 14px; border-bottom: 1px solid #161b26; text-align: right; white-space: nowrap; }
   tbody td:first-child, tbody td.left { text-align: left; }
   tbody tr:last-child td { border-bottom: 0; }
+  tbody tr[data-t] { cursor: pointer; }
   tbody tr:hover { background: var(--hover); }
 
   .sym { display: flex; align-items: center; gap: 10px; }
@@ -118,6 +126,11 @@
   <div class="cards" id="cards"></div>
 
   <div class="controls">
+    <div class="datenav" id="datenav" hidden>
+      <button id="prev" title="Previous run">‹</button>
+      <select id="date"></select>
+      <button id="next" title="Next run">›</button>
+    </div>
     <div class="tabs" id="tabs"></div>
     <input type="search" id="q" placeholder="Search symbol or company…">
     <select id="sector"><option value="">All sectors</option></select>
@@ -257,7 +270,7 @@ function renderTable() {
   const all = rows();
   const shown = all.slice(0, state.limit);
   $('body').innerHTML = shown.length
-    ? shown.map(r => `<tr>${COLUMNS.map(c =>
+    ? shown.map(r => `<tr data-t="${esc(r.ticker)}">${COLUMNS.map(c =>
         `<td class="${c.left ? 'left' : ''}">${c.render(r, ctx)}</td>`).join('')}</tr>`).join('')
     : `<tr><td class="err" colspan="${COLUMNS.length}">No matches — market's quiet or your filters are strict.</td></tr>`;
   $('count').textContent = `${all.length} stocks`;
@@ -274,9 +287,10 @@ function renderTabs() {
     `<button class="${state.tab === id ? 'active' : ''}" data-tab="${id}">${label}</button>`).join('');
 }
 
-function fillSelect(id, key) {
+function fillSelect(id, key, allLabel) {
   const vals = [...new Set([...DATA.breakouts, ...DATA.near].map(r => r[key]).filter(Boolean))].sort();
-  $(id).innerHTML += vals.map(v => `<option>${esc(v)}</option>`).join('');
+  $(id).innerHTML = `<option value="">${allLabel}</option>` +
+    vals.map(v => `<option>${esc(v)}</option>`).join('');
 }
 
 /* ---------- events ---------- */
@@ -295,22 +309,66 @@ $('q').addEventListener('input', e => { state.q = e.target.value; state.limit = 
 $('sector').addEventListener('change', e => { state.sector = e.target.value; state.limit = PAGE; renderTable(); });
 $('country').addEventListener('change', e => { state.country = e.target.value; state.limit = PAGE; renderTable(); });
 $('more').addEventListener('click', () => { state.limit = Infinity; renderTable(); });
+$('body').addEventListener('click', e => {
+  if (e.target.closest('a')) return;            // symbol link handles itself
+  const tr = e.target.closest('tr[data-t]');
+  if (tr) window.open(tvUrl(tr.dataset.t), '_blank', 'noopener');
+});
 
-/* ---------- boot ---------- */
-fetch('data.json?v=' + Date.now())
-  .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
-  .then(d => {
-    DATA = d;
-    $('updated').textContent = 'Updated ' + d.generated_utc;
-    $('subtitle').textContent =
-      `Global stocks within ${d.params.proximity_pct}% of their 52-week high · ` +
-      `market cap > ${fmtCap(d.params.min_market_cap)} · ${d.params.markets} markets, updated daily`;
-    $('f-bp').textContent = d.params.breakout_pct;
-    $('f-vt').textContent = d.params.volume_threshold;
-    $('f-pp').textContent = d.params.proximity_pct;
-    fillSelect('sector', 'sector'); fillSelect('country', 'country');
-    renderCards(); renderTabs(); renderTable();
+/* ---------- date navigation + boot ---------- */
+let DATES = [];   // available run dates, oldest -> newest
+
+const getJSON = url => fetch(url + '?v=' + Date.now())
+  .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+
+function applyData(d) {
+  DATA = d;
+  state = { ...state, q: '', sector: '', country: '', sortCol: null, sortDir: 1, limit: PAGE };
+  $('q').value = '';
+  $('updated').textContent = 'Updated ' + d.generated_utc;
+  $('subtitle').textContent =
+    `Global stocks within ${d.params.proximity_pct}% of their 52-week high · ` +
+    `market cap > ${fmtCap(d.params.min_market_cap)} · ${d.params.markets} markets, updated daily`;
+  $('f-bp').textContent = d.params.breakout_pct;
+  $('f-vt').textContent = d.params.volume_threshold;
+  $('f-pp').textContent = d.params.proximity_pct;
+  fillSelect('sector', 'sector', 'All sectors');
+  fillSelect('country', 'country', 'All countries');
+  renderCards(); renderTabs(); renderTable();
+}
+
+function renderDateNav(date) {
+  const i = DATES.indexOf(date);
+  $('date').value = date;
+  $('prev').disabled = i <= 0;
+  $('next').disabled = i < 0 || i >= DATES.length - 1;
+  history.replaceState(null, '', i === DATES.length - 1 ? location.pathname : '#' + date);
+}
+
+function loadRun(date) {
+  renderDateNav(date);
+  getJSON(`runs/${date}.json`).then(applyData).catch(err => {
+    $('body').innerHTML = `<tr><td class="err" colspan="${COLUMNS.length}">Couldn't load run ${esc(date)} (${esc(err.message)}).</td></tr>`;
+  });
+}
+
+function stepDate(delta) {
+  const i = DATES.indexOf($('date').value) + delta;
+  if (i >= 0 && i < DATES.length) loadRun(DATES[i]);
+}
+$('prev').addEventListener('click', () => stepDate(-1));
+$('next').addEventListener('click', () => stepDate(1));
+$('date').addEventListener('change', e => loadRun(e.target.value));
+
+getJSON('runs/index.json')
+  .then(idx => {
+    DATES = idx.dates;
+    $('date').innerHTML = [...DATES].reverse().map(d => `<option>${d}</option>`).join('');
+    $('datenav').hidden = false;
+    const hash = location.hash.slice(1);
+    loadRun(DATES.includes(hash) ? hash : DATES[DATES.length - 1]);
   })
+  .catch(() => getJSON('data.json').then(applyData))   // pre-archive fallback
   .catch(err => {
     $('body').innerHTML = `<tr><td class="err">Couldn't load data.json (${esc(err.message)}).
       If this is a fresh deploy, wait for the first screener run.</td></tr>`;

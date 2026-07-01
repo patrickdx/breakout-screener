@@ -33,6 +33,7 @@ PROXIMITY_PCT = 5.0       # % below 52w high to stay on screen at all
 VOLUME_THRESHOLD = 1.2    # today's volume vs 10-day average
 MIN_MARKET_CAP = 2_000_000_000   # USD
 HISTORY_MAX_RUNS = 500    # prune history beyond this many run dates
+ARCHIVE_MAX_RUNS = 120    # per-run JSON archives kept in docs/runs/
 TREND_RUNS = 90           # runs shown in the dashboard trend chart
 
 MARKETS = [
@@ -62,6 +63,7 @@ HISTORY_COLUMNS = ['run_date', 'session_date', 'list', 'ticker',
 ROOT = Path(__file__).resolve().parent
 HISTORY_PATH = ROOT / 'data' / 'history.csv'
 DATA_JSON_PATH = ROOT / 'docs' / 'data.json'
+RUNS_DIR = ROOT / 'docs' / 'runs'
 
 
 def fetch() -> pd.DataFrame:
@@ -192,8 +194,8 @@ def build_trend(history: pd.DataFrame) -> list[dict]:
             for d, r in counts.tail(TREND_RUNS).iterrows()]
 
 
-def write_json(today: pd.DataFrame, trend: list[dict],
-               run_date: str, generated: str) -> None:
+def build_payload(today: pd.DataFrame, trend: list[dict], run_date: str,
+                  generated: str, backfilled: bool = False) -> dict:
     breakouts = today[today['list'] == 'Breakout'].sort_values(
         ['streak', 'dist_pct'], ascending=[False, True])
     near = today[today['list'] == 'Near'].sort_values('dist_pct')
@@ -216,8 +218,26 @@ def write_json(today: pd.DataFrame, trend: list[dict],
         'breakouts': records(breakouts),
         'near': records(near),
     }
+    if backfilled:
+        payload['backfilled'] = True
+    return payload
+
+
+def write_latest(payload: dict) -> None:
     DATA_JSON_PATH.parent.mkdir(exist_ok=True)
     DATA_JSON_PATH.write_text(json.dumps(payload, separators=(',', ':')))
+
+
+def write_archive(payload: dict) -> None:
+    """Store the run under docs/runs/<date>.json and rebuild the date index."""
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    (RUNS_DIR / f"{payload['run_date']}.json").write_text(
+        json.dumps(payload, separators=(',', ':')))
+    dates = sorted(p.stem for p in RUNS_DIR.glob('????-??-??.json'))
+    for d in dates[:-ARCHIVE_MAX_RUNS]:
+        (RUNS_DIR / f'{d}.json').unlink()
+    (RUNS_DIR / 'index.json').write_text(
+        json.dumps({'dates': dates[-ARCHIVE_MAX_RUNS:]}))
 
 
 def main() -> int:
@@ -238,7 +258,10 @@ def main() -> int:
     HISTORY_PATH.parent.mkdir(exist_ok=True)
     history.to_csv(HISTORY_PATH, index=False)
 
-    write_json(today, build_trend(history), run_date, now.strftime('%Y-%m-%d %H:%M UTC'))
+    payload = build_payload(today, build_trend(history), run_date,
+                            now.strftime('%Y-%m-%d %H:%M UTC'))
+    write_latest(payload)
+    write_archive(payload)
 
     n_b = int((today['list'] == 'Breakout').sum())
     stale = int((today['session_date'] != run_date).sum())
