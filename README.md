@@ -57,6 +57,22 @@ is the date the current breakout streak began. On the very first run every
 streak is 1; it accrues from there. History is pruned beyond
 `HISTORY_MAX_RUNS` (500) run dates.
 
+## Signal performance (benchmark-adjusted forward returns)
+
+Every ticker that fires a Breakout stays in a daily price log
+(`data/prices.csv`) for `COHORT_RUNS` (70) runs — **even after it falls off
+screen**, so failed breakouts stay measurable and the stats carry no
+survivorship bias. Benchmark ETFs (QQQ, ACWI) are logged as ordinary rows.
+
+Each run recomputes `docs/performance.json`: for every signal old enough,
+excess return = the stock's +5/+20/+60-run return **minus the benchmark's
+return over the same window**, aggregated into hit rate / median / mean per
+group (all breakouts, first-day signals, continuation days, and the old
+state rule as a comparison — both definitions live side by side). Every
+signal is accounted for: measured, pending, missing (delisted — reported,
+never dropped), invalid (±40% one-day move = probable split), or
+pre-tracking. The dashboard renders the table once numbers exist.
+
 ## Notes on the data
 
 - Prices are in each listing's **local currency**; market cap is normalized to

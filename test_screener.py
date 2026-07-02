@@ -186,6 +186,89 @@ def test_update_history_prunes_old_runs(monkeypatch):
     assert sorted(out['run_date'].unique()) == ['2026-06-30', RUN]
 
 
+# --- forward-return tracking ----------------------------------------------------
+
+D = ['2026-07-01', '2026-07-02', '2026-07-03', '2026-07-06', '2026-07-07']
+
+
+def price_frame(rows: list[tuple]) -> pd.DataFrame:
+    return pd.DataFrame([{'run_date': d, 'ticker': t, 'close': c}
+                         for d, t, c in rows])
+
+
+def sig_hist(rows: list[tuple]) -> pd.DataFrame:
+    """(run_date, list, ticker, price, dist_pct, rel_volume)"""
+    return pd.DataFrame([{'run_date': d, 'session_date': d, 'list': l, 'ticker': t,
+                          'price': p, 'dist_pct': dist, 'rel_volume': rv}
+                         for d, l, t, p, dist, rv in rows])
+
+
+def perf(history, prices, monkeypatch, horizons=(2,)):
+    import screener
+    monkeypatch.setattr(screener, 'HORIZONS', horizons)
+    monkeypatch.setattr(screener, 'BENCHMARK', 'Q')
+    return screener.compute_performance(history, prices)
+
+
+def bench_rows(closes):
+    return [(d, 'Q', c) for d, c in zip(D, closes)]
+
+
+def test_performance_excess_return_vs_benchmark(monkeypatch):
+    h = sig_hist([(D[0], 'Breakout', 'A', 100.0, 0.1, 2.0)])
+    p = price_frame([(D[0], 'A', 100), (D[2], 'A', 120)] + bench_rows([100, 105, 110, 112, 115]))
+    s = perf(h, p, monkeypatch)['groups'][0]['stats']['2']
+    assert s['n'] == 1 and s['hit_rate'] == 100.0
+    assert s['mean_raw'] == 20.0 and s['mean_excess'] == 10.0   # 20% - 10% bench
+
+
+def test_performance_missing_exit_counted_not_dropped(monkeypatch):
+    # Ticker vanished (delisted) — must surface as missing, not silently skew stats.
+    h = sig_hist([(D[0], 'Breakout', 'GONE', 100.0, 0.1, 2.0)])
+    p = price_frame([(D[0], 'GONE', 100)] + bench_rows([100, 100, 100, 100, 100]))
+    s = perf(h, p, monkeypatch)['groups'][0]['stats']['2']
+    assert (s['n'], s['missing']) == (0, 1)
+
+
+def test_performance_pending_and_pre_tracking(monkeypatch):
+    h = sig_hist([(D[3], 'Breakout', 'A', 100.0, 0.1, 2.0),       # window not elapsed
+                  ('2026-06-01', 'Breakout', 'B', 50.0, 0.1, 2.0)])  # before price log
+    p = price_frame(bench_rows([100, 100, 100, 100, 100]))
+    s = perf(h, p, monkeypatch)['groups'][0]['stats']['2']
+    assert (s['pending'], s['pre_tracking'], s['n']) == (1, 1, 0)
+
+
+def test_performance_split_guard(monkeypatch):
+    h = sig_hist([(D[0], 'Breakout', 'A', 100.0, 0.1, 2.0)])
+    p = price_frame([(D[0], 'A', 100), (D[1], 'A', 300), (D[2], 'A', 310)]
+                    + bench_rows([100, 100, 100, 100, 100]))
+    s = perf(h, p, monkeypatch)['groups'][0]['stats']['2']
+    assert (s['n'], s['invalid']) == (0, 1)
+
+
+def test_performance_new_vs_continuation_and_old_rule(monkeypatch):
+    h = sig_hist([(D[0], 'Breakout', 'A', 100.0, 0.1, 2.0),
+                  (D[1], 'Breakout', 'A', 105.0, 0.1, 2.0),      # continuation
+                  (D[1], 'Near', 'B', 50.0, 0.2, 3.0)])          # old-rule hit, Near list
+    p = price_frame(bench_rows([100, 100, 100, 100, 100]))
+    g = {x['name']: x for x in perf(h, p, monkeypatch)['groups']}
+    assert g['Breakouts']['signals'] == 2
+    assert g['First-day signals (NEW)']['signals'] == 1
+    assert g['Continuation days']['signals'] == 1
+    assert g['Old state rule (comparison)']['signals'] == 3      # A x2 + B
+
+
+def test_build_cohort_and_merge_prices(monkeypatch):
+    import screener
+    monkeypatch.setattr(screener, 'PRICES_MAX_RUNS', 2)
+    h = sig_hist([(D[0], 'Breakout', 'A', 100.0, 0.1, 2.0),
+                  (D[1], 'Near', 'B', 50.0, 3.0, 1.0)])
+    assert screener.build_cohort(h) == ['A']                     # breakouts only
+    p = price_frame([(D[0], 'A', 1), (D[1], 'A', 2), (D[1], 'STALE', 9)])
+    out = screener.merge_prices(p, {'A': 3.0}, D[1])             # re-run D[1] + prune
+    assert list(out['ticker']) == ['A', 'A'] and list(out['close']) == [1, 3.0]
+
+
 def test_build_trails_covers_screen_tickers_only_oldest_first():
     from screener import build_trails
     h = hist([('2026-06-30', '2026-06-30', 'Near', 'A'),

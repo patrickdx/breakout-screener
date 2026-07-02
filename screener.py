@@ -51,6 +51,19 @@ ARCHIVE_MAX_RUNS = 120    # per-run JSON archives kept in docs/runs/
 TREND_RUNS = 90           # runs shown in the dashboard trend chart
 TRAIL_RUNS = 40           # per-ticker appearance trail for the detail panel
 
+# --- forward-return tracking ---------------------------------------------------
+# Every ticker that fired a Breakout within the last COHORT_RUNS runs keeps
+# getting its close logged daily — even after it falls off screen — so failed
+# breakouts stay measurable (no survivorship bias). Benchmarks ride along as
+# ordinary rows; excess return = signal return minus BENCHMARK over the same
+# window of runs.
+BENCHMARK = 'NASDAQ:QQQ'
+BENCHMARK_TICKERS = ['NASDAQ:QQQ', 'NASDAQ:ACWI']
+HORIZONS = (5, 20, 60)    # forward windows, in runs (~trading days)
+COHORT_RUNS = 70          # how long a signal's ticker stays in the price log
+PRICES_MAX_RUNS = 500     # prune the price log beyond this many run dates
+SPLIT_GUARD_PCT = 40      # a 1-run move beyond this voids the window (split?)
+
 MARKETS = [
     # Americas
     'america', 'canada', 'mexico', 'brazil', 'chile', 'colombia', 'peru', 'argentina',
@@ -86,6 +99,8 @@ DATA_JSON_PATH = ROOT / 'docs' / 'data.json'
 RUNS_DIR = ROOT / 'docs' / 'runs'
 TRAILS_PATH = ROOT / 'docs' / 'trails.json'
 CEILINGS_PATH = ROOT / 'data' / 'ceilings.json'
+PRICES_PATH = ROOT / 'data' / 'prices.csv'
+PERFORMANCE_PATH = ROOT / 'docs' / 'performance.json'
 
 
 def fetch() -> pd.DataFrame:
@@ -266,6 +281,133 @@ def build_trails(history: pd.DataFrame, today: pd.DataFrame) -> dict:
     return trails
 
 
+# --- forward-return tracking ---------------------------------------------------
+
+def build_cohort(history: pd.DataFrame) -> list[str]:
+    """Tickers whose forward prices we still need: breakouts in recent runs."""
+    b = history[history['list'] == 'Breakout']
+    recent = sorted(set(b['run_date']))[-COHORT_RUNS:]
+    return sorted(set(b.loc[b['run_date'].isin(recent), 'ticker']))
+
+
+def fetch_prices(tickers: list[str]) -> dict[str, float]:
+    """Current close per ticker, filters stripped so delisted-from-screen
+    stocks and benchmark ETFs come back too."""
+    closes: dict[str, float] = {}
+    for i in range(0, len(tickers), 500):
+        q = Query().set_tickers(*tickers[i:i + 500]).select('close').limit(600)
+        q.query.pop('filter', None)     # default presets exclude funds (QQQ)
+        q.query.pop('filter2', None)
+        _, df = q.get_scanner_data()
+        closes.update({r.ticker: float(r.close) for r in df.itertuples()
+                       if pd.notna(r.close)})
+    return closes
+
+
+def load_prices() -> pd.DataFrame:
+    if not PRICES_PATH.exists():
+        return pd.DataFrame(columns=['run_date', 'ticker', 'close'])
+    return pd.read_csv(PRICES_PATH, dtype={'run_date': str, 'ticker': str})
+
+
+def merge_prices(prices: pd.DataFrame, closes: dict[str, float],
+                 run_date: str) -> pd.DataFrame:
+    """Replace run_date's rows (idempotent re-runs), prune old run dates."""
+    rows = pd.DataFrame({'run_date': run_date, 'ticker': list(closes),
+                         'close': list(closes.values())})
+    out = pd.concat([prices[prices['run_date'] != run_date], rows],
+                    ignore_index=True)
+    keep = sorted(out['run_date'].unique())[-PRICES_MAX_RUNS:]
+    return (out[out['run_date'].isin(keep)]
+            .sort_values(['run_date', 'ticker'], ignore_index=True))
+
+
+def compute_performance(history: pd.DataFrame, prices: pd.DataFrame) -> dict:
+    """Benchmark-adjusted forward returns for every stored signal.
+
+    Windows are counted in price-log runs. Every signal is accounted for:
+    measured, pending (window not elapsed), missing (no exit price — delisted
+    or fetch failure; reported, never silently dropped), invalid (split-guard
+    tripped), or pre_tracking (signal predates the price log).
+    """
+    run_dates = sorted(prices['run_date'].unique())
+    idx = {d: i for i, d in enumerate(run_dates)}
+    px = {(r.ticker, r.run_date): float(r.close) for r in prices.itertuples()}
+
+    def window_valid(t: str, i0: int, i1: int) -> bool:
+        prev = None
+        for d in run_dates[i0:i1 + 1]:
+            c = px.get((t, d))
+            if c is None:
+                continue
+            if prev and abs(c / prev - 1) * 100 > SPLIT_GUARD_PCT:
+                return False
+            prev = c
+        return True
+
+    def measure(sigs: pd.DataFrame) -> dict:
+        out = {}
+        for n in HORIZONS:
+            excess, raw = [], []
+            pending = missing = invalid = pre = 0
+            for row in sigs.itertuples():
+                d0, t, p0 = row.run_date, row.ticker, float(row.price)
+                if d0 not in idx:
+                    pre += 1
+                    continue
+                i0 = idx[d0]
+                i1 = i0 + n
+                if i1 >= len(run_dates):
+                    pending += 1
+                    continue
+                d1 = run_dates[i1]
+                p1, b0, b1 = (px.get((t, d1)), px.get((BENCHMARK, d0)),
+                              px.get((BENCHMARK, d1)))
+                if p1 is None or b0 is None or b1 is None:
+                    missing += 1
+                    continue
+                if not window_valid(t, i0, i1):
+                    invalid += 1
+                    continue
+                r = (p1 / p0 - 1) * 100
+                raw.append(r)
+                excess.append(r - (b1 / b0 - 1) * 100)
+            e = pd.Series(excess, dtype=float)
+            out[str(n)] = {
+                'n': len(e), 'pending': pending, 'missing': missing,
+                'invalid': invalid, 'pre_tracking': pre,
+                'hit_rate': None if e.empty else round(float((e > 0).mean()) * 100, 1),
+                'median_excess': None if e.empty else round(float(e.median()), 2),
+                'mean_excess': None if e.empty else round(float(e.mean()), 2),
+                'mean_raw': None if not raw else round(float(pd.Series(raw).mean()), 2),
+            }
+        return out
+
+    hist_runs = sorted(set(history['run_date']))
+    prev_run = {d: (hist_runs[i - 1] if i else None) for i, d in enumerate(hist_runs)}
+    b_sets = {d: set(g.loc[g['list'] == 'Breakout', 'ticker'])
+              for d, g in history.groupby('run_date')}
+    sig = history[history['list'] == 'Breakout']
+    new_mask = pd.Series(
+        [r.ticker not in b_sets.get(prev_run.get(r.run_date) or '', set())
+         for r in sig.itertuples()], index=sig.index, dtype=bool)
+    old_rule = history[(history['dist_pct'] <= BREAKOUT_PCT)
+                       & (history['rel_volume'] > VOLUME_THRESHOLD)]
+
+    groups = [('Breakouts', sig),
+              ('First-day signals (NEW)', sig[new_mask]),
+              ('Continuation days', sig[~new_mask]),
+              ('Old state rule (comparison)', old_rule)]
+    return {
+        'benchmark': BENCHMARK,
+        'tracking_since': run_dates[0] if run_dates else None,
+        'updated': run_dates[-1] if run_dates else None,
+        'horizons': list(HORIZONS),
+        'groups': [{'name': name, 'signals': int(len(s)), 'stats': measure(s)}
+                   for name, s in groups],
+    }
+
+
 def build_trend(history: pd.DataFrame) -> list[dict]:
     counts = (history.groupby(['run_date', 'list']).size()
               .unstack(fill_value=0).reindex(columns=['Breakout', 'Near'], fill_value=0))
@@ -347,6 +489,15 @@ def main() -> int:
                                       separators=(',', ':')))
     write_ceilings(run_date, dict(zip(
         raw['ticker'], raw['price_52_week_high'].astype(float).round(4))))
+
+    closes = fetch_prices(build_cohort(history) + BENCHMARK_TICKERS)
+    prices = merge_prices(load_prices(), closes, run_date)
+    prices.to_csv(PRICES_PATH, index=False)
+    perf = compute_performance(history, prices)
+    PERFORMANCE_PATH.write_text(json.dumps(perf, separators=(',', ':')))
+    measured = sum(s['n'] for g in perf['groups'] if g['name'] == 'Breakouts'
+                   for s in g['stats'].values())
+    print(f'Cohort prices logged: {len(closes)} | measured windows: {measured}')
 
     n_b = int((today['list'] == 'Breakout').sum())
     stale = int((today['session_date'] != run_date).sum())
