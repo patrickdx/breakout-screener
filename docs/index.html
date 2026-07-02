@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Breakout Screener</title>
 <meta name="description" content="Global stocks within 5% of their 52-week high, >$2B market cap, updated daily.">
+<meta name="theme-color" content="#0b0e14">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -62,7 +67,7 @@
   .count { color: var(--muted); font-size: 13px; margin-left: auto; white-space: nowrap; }
 
   .table-wrap { background: var(--card); border: 1px solid var(--card-border); border-radius: 12px; overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; min-width: 900px; }
+  table { border-collapse: collapse; width: 100%; min-width: 980px; }
   thead th {
     position: sticky; top: 0; background: var(--card); z-index: 1;
     text-align: right; color: var(--muted); font-size: 12px; font-weight: 600;
@@ -91,6 +96,7 @@
   .sym .nm { color: var(--muted); font-size: 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
   .ccy { color: var(--faint); font-size: 11px; margin-left: 4px; }
   .stale { color: var(--amber); cursor: help; }
+  .ewarn { font-size: 11px; cursor: help; }
   .up { color: var(--green); } .down { color: var(--red); }
 
   .dist { display: inline-flex; align-items: center; gap: 8px; }
@@ -250,8 +256,10 @@ const COLUMNS = [
              onerror="this.replaceWith(Object.assign(document.createElement('span'),
              {className:'logo-fb',textContent:'${esc(r.symbol[0])}'}))">`
         : `<span class="logo-fb">${esc(r.symbol[0])}</span>`;
+      const earn = r.earnings_in != null && r.earnings_in <= 7
+        ? ` <span class="ewarn" title="Earnings in ${Math.round(r.earnings_in)} day${r.earnings_in >= 2 ? 's' : ''}">⚠️</span>` : '';
       return `<div class="sym">${logo}<div>
-        <a href="${tvUrl(r.ticker)}" target="_blank" rel="noopener">${esc(r.symbol)}</a>
+        <a href="${tvUrl(r.ticker)}" target="_blank" rel="noopener">${esc(r.symbol)}</a>${earn}
         <div class="nm" title="${esc(r.name)}">${esc(r.name)}</div></div></div>`;
     } },
   { label: 'Price', sort: r => r.price, render: (r, ctx) => {
@@ -268,6 +276,10 @@ const COLUMNS = [
     } },
   { label: 'Rel Vol', sort: r => r.rel_volume ?? -1, render: r =>
       r.rel_volume == null ? '–' : r.rel_volume.toFixed(2) + '×' },
+  { label: 'RS 3M', sort: r => r.rs ?? -1e9, render: r =>
+      r.rs == null ? '–'
+        : `<span class="${r.rs >= 0 ? 'up' : 'down'}"
+             title="3-month performance vs the median of its country's near-high peers">${fmtPct(r.rs)}</span>` },
   { label: 'Streak', sort: r => r.streak || r.days_near, render: (r, ctx) => {
       if (ctx.tab === 'near')
         return `<span class="pill plain">${r.days_near}d</span>`;
@@ -478,6 +490,8 @@ function openDetail(t) {
     : `<span class="logo-fb">${esc(r.symbol[0])}</span>`;
   const stale = r.session_date !== DATA.run_date
     ? `<span class="chip" style="color:var(--amber)">last session ${esc(r.session_date)}</span>` : '';
+  const earnChip = r.earnings_in != null && r.earnings_in <= 21
+    ? `<span class="chip" style="color:var(--amber)">⚠️ earnings in ${Math.round(r.earnings_in)}d</span>` : '';
   const streakStat = r.streak > 0
     ? `${r.streak} <small>session${r.streak > 1 ? 's' : ''}${r.streak > 1 ? ' · since ' + esc(r.streak_start) : ' · NEW'}</small>`
     : `– <small>on Near list</small>`;
@@ -501,7 +515,7 @@ function openDetail(t) {
       ${r.industry ? `<span class="chip">${esc(r.industry)}</span>` : ''}
       <span class="chip">${esc(r.country)}</span>
       <span class="chip">${esc(r.exchange)}</span>
-      ${stale}
+      ${earnChip}${stale}
     </div>
     <div class="stats">
       <div class="stat"><div class="k">From 52w high</div>
@@ -509,6 +523,8 @@ function openDetail(t) {
         <small>high ${fmtPrice(r.high_52w, r.currency)}</small></div></div>
       <div class="stat"><div class="k">Rel volume (10d)</div>
         <div class="v">${r.rel_volume == null ? '–' : r.rel_volume.toFixed(2) + '×'}</div></div>
+      <div class="stat"><div class="k">RS 3M vs country</div>
+        <div class="v ${r.rs >= 0 ? 'up' : 'down'}">${r.rs == null ? '–' : fmtPct(r.rs)}</div></div>
       <div class="stat"><div class="k">Breakout streak</div><div class="v">${streakStat}</div></div>
       <div class="stat"><div class="k">On screen</div>
         <div class="v">${r.days_near} <small>session${r.days_near > 1 ? 's' : ''}</small></div></div>

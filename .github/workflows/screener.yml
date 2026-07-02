@@ -34,6 +34,8 @@ jobs:
         run: pytest -q
 
       - name: Run screener
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python screener.py
 
       - name: Commit results

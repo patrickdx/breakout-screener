@@ -57,6 +57,27 @@ is the date the current breakout streak began. On the very first run every
 streak is 1; it accrues from there. History is pruned beyond
 `HISTORY_MAX_RUNS` (500) run dates.
 
+## Notifications
+
+Set a `DISCORD_WEBHOOK_URL` repository secret (Discord: channel → Integrations
+→ Webhooks → New Webhook → Copy URL) and every run posts the day's **new**
+breakouts (streak = 1) — symbol, day move, volume, market cap, and an ⚠️ when
+earnings are within 7 days. Monday runs append a recap of the past week's
+most persistent breakouts. No secret → no post; a failed post never fails
+the run.
+
+## Extra columns
+
+- **RS 3M** — 3-month performance minus the median of the same country's
+  scanned cohort (stocks within 25% of their highs): a currency-consistent
+  leader/laggard score, stored in history so the performance tracker can
+  later test whether high-RS breakouts outperform.
+- **⚠️ earnings** — days until the next earnings report (from TradingView's
+  calendar), flagged on the dashboard when ≤ 7 days.
+
+The dashboard is also an installable web app (manifest + icons) — "Add to
+Home Screen" on a phone gives it an app icon and standalone window.
+
 ## Signal performance (benchmark-adjusted forward returns)
 
 Every ticker that fires a Breakout stays in a daily price log

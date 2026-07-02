@@ -35,7 +35,9 @@ normalized to USD by TradingView.
 """
 import datetime
 import json
+import os
 import sys
+import urllib.request
 from pathlib import Path
 
 import pandas as pd
@@ -87,11 +89,17 @@ FIELDS = [
     'name', 'description', 'close', 'currency', 'change',
     'price_52_week_high', 'relative_volume_10d_calc', 'market_cap_basic',
     'sector', 'industry', 'country', 'exchange', 'logoid', 'time',
+    'earnings_release_next_date',
     *PERF_FIELDS,
 ]
 
+EARNINGS_MAX_DAYS = 90    # ignore earnings dates further out than this
+EARNINGS_SOON_DAYS = 7    # dashboard/notification warning threshold
+
 HISTORY_COLUMNS = ['run_date', 'session_date', 'list', 'ticker',
-                   'price', 'dist_pct', 'rel_volume']
+                   'price', 'dist_pct', 'rel_volume', 'rs']
+
+DASHBOARD_URL = 'https://patrickdx.github.io/breakout-screener/'
 
 ROOT = Path(__file__).resolve().parent
 HISTORY_PATH = ROOT / 'data' / 'history.csv'
@@ -155,6 +163,15 @@ def classify(df: pd.DataFrame, run_date: str,
     })
     for src, dst in PERF_FIELDS.items():
         out[dst] = df[src].astype(float).round(1)
+    # Days until the next earnings report (null if unknown or > EARNINGS_MAX_DAYS).
+    earn = pd.to_datetime(df['earnings_release_next_date'], unit='s', utc=True)
+    days = (earn - pd.Timestamp(run_date, tz='UTC')).dt.days.astype(float)
+    out['earnings_in'] = days.where((days >= 0) & (days <= EARNINGS_MAX_DAYS))
+    # Relative strength: 3-month perf minus the median of the same country's
+    # scanned cohort (stocks within UNIVERSE_PCT of their highs) — currency-
+    # consistent leader/laggard ranking with no benchmark data needed.
+    med = df.groupby(df['country'].fillna(''))['Perf.3M'].transform('median')
+    out['rs'] = (df['Perf.3M'] - med).astype(float).round(1)
     prior = out['ticker'].map(prior_ceilings or {})
     vol_ok = out['rel_volume'] > VOLUME_THRESHOLD
     crossed = (out['price'] > prior) & vol_ok          # NaN prior compares False
@@ -251,8 +268,8 @@ def compute_streaks(history: pd.DataFrame, today: pd.DataFrame,
 def update_history(history: pd.DataFrame, today: pd.DataFrame,
                    run_date: str) -> pd.DataFrame:
     """Replace any rows for run_date with today's, then prune old runs."""
-    rows = today[['session_date', 'list', 'ticker', 'price',
-                  'dist_pct', 'rel_volume']].copy()
+    rows = today.reindex(columns=['session_date', 'list', 'ticker', 'price',
+                                  'dist_pct', 'rel_volume', 'rs']).copy()
     rows.insert(0, 'run_date', run_date)
     hist = pd.concat([history[history['run_date'] != run_date], rows],
                      ignore_index=True)[HISTORY_COLUMNS]
@@ -415,6 +432,72 @@ def compute_performance(history: pd.DataFrame, prices: pd.DataFrame) -> dict:
     }
 
 
+# --- notifications ---------------------------------------------------------------
+
+def _fmt_cap(v: float) -> str:
+    if v >= 1e12:
+        return f'${v / 1e12:.2f}T'
+    if v >= 1e9:
+        return f'${v / 1e9:.1f}B'
+    return f'${v / 1e6:.0f}M'
+
+
+def build_notification(payload: dict, is_monday: bool,
+                       history: pd.DataFrame) -> str | None:
+    """Discord message for today's NEW breakouts (+ a Monday recap line).
+
+    Returns None when there's nothing worth pinging about. Pure function so
+    the formatting is testable without a webhook.
+    """
+    new = [r for r in payload['breakouts'] if r.get('streak') == 1]
+    lines: list[str] = []
+    if new:
+        lines.append(f"🚀 **{len(new)} new breakout{'s' if len(new) != 1 else ''}**"
+                     f" — {payload['run_date']}"
+                     f" ({payload['stats']['breakouts']} on the list in total)")
+        for r in new[:10]:
+            chg = '' if r.get('change') is None else f" {r['change']:+.1f}%"
+            rv = '' if r.get('rel_volume') is None else f" · {r['rel_volume']:.1f}× vol"
+            ei = r.get('earnings_in')
+            earn = (f' · ⚠️ earnings in {int(ei)}d'
+                    if ei is not None and ei <= EARNINGS_SOON_DAYS else '')
+            lines.append(f"• **{r['symbol']}** {(r['name'] or '')[:32]} —"
+                         f"{chg}{rv} · {_fmt_cap(r['mcap'])} · {r['country']}{earn}")
+        if len(new) > 10:
+            lines.append(f'…and {len(new) - 10} more')
+    if is_monday and not history.empty:
+        week = sorted(set(history['run_date']))[-5:]
+        wk = history[history['run_date'].isin(week) & (history['list'] == 'Breakout')]
+        if len(wk):
+            top = wk['ticker'].value_counts()
+            leaders = ', '.join(t.split(':')[-1] for t in top.index[:5])
+            lines.append(f"\n📅 Past {len(week)} runs: {top.size} unique breakout"
+                         f" tickers · most persistent: {leaders}")
+    if not lines:
+        return None
+    lines.append(f'\n📊 {DASHBOARD_URL}')
+    return '\n'.join(lines)[:1990]      # Discord content cap is 2000 chars
+
+
+def notify(payload: dict, history: pd.DataFrame, now: datetime.datetime) -> None:
+    """Post to DISCORD_WEBHOOK_URL if configured. Never fails the run."""
+    url = os.environ.get('DISCORD_WEBHOOK_URL')
+    if not url:
+        return
+    msg = build_notification(payload, now.weekday() == 0, history)
+    if not msg:
+        return
+    try:
+        req = urllib.request.Request(
+            url, data=json.dumps({'content': msg}).encode(),
+            headers={'Content-Type': 'application/json',
+                     'User-Agent': 'breakout-screener'})
+        urllib.request.urlopen(req, timeout=15)
+        print('Notification posted.')
+    except Exception as e:                       # noqa: BLE001
+        print(f'Notification failed (non-fatal): {e}', file=sys.stderr)
+
+
 def build_trend(history: pd.DataFrame) -> list[dict]:
     counts = (history.groupby(['run_date', 'list']).size()
               .unstack(fill_value=0).reindex(columns=['Breakout', 'Near'], fill_value=0))
@@ -505,6 +588,8 @@ def main() -> int:
     measured = sum(s['n'] for g in perf['groups'] if g['name'] == 'Breakouts'
                    for s in g['stats'].values())
     print(f'Cohort prices logged: {len(closes)} | measured windows: {measured}')
+
+    notify(payload, history, now)
 
     n_b = int((today['list'] == 'Breakout').sum())
     stale = int((today['session_date'] != run_date).sum())

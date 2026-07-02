@@ -19,6 +19,7 @@ def scanner_frame(rows: list[dict]) -> pd.DataFrame:
         'time': pd.Timestamp(f'{RUN} 13:30', tz='UTC').timestamp(),
         'Perf.W': 2.5, 'Perf.1M': 8.0, 'Perf.3M': 15.0, 'Perf.6M': 30.0,
         'Perf.YTD': 30.0, 'Perf.Y': 60.0,
+        'earnings_release_next_date': None,
     }
     return pd.DataFrame([{**defaults, **r} for r in rows])
 
@@ -268,6 +269,63 @@ def test_build_cohort_and_merge_prices(monkeypatch):
     p = price_frame([(D[0], 'A', 1), (D[1], 'A', 2), (D[1], 'STALE', 9)])
     out = screener.merge_prices(p, {'A': 3.0}, D[1])             # re-run D[1] + prune
     assert list(out['ticker']) == ['A', 'A'] and list(out['close']) == [1, 3.0]
+
+
+def test_classify_earnings_in_days():
+    soon = pd.Timestamp('2026-07-04', tz='UTC').timestamp()
+    far = pd.Timestamp('2026-12-01', tz='UTC').timestamp()   # > 90d -> null
+    df = classify(scanner_frame([
+        {'ticker': 'A', 'earnings_release_next_date': soon},
+        {'ticker': 'B', 'earnings_release_next_date': far},
+        {'ticker': 'C'},
+    ]), RUN)
+    e = df.set_index('ticker')['earnings_in']
+    assert e['A'] == 3.0 and pd.isna(e['B']) and pd.isna(e['C'])
+
+
+def test_classify_relative_strength_vs_country_median():
+    df = classify(scanner_frame([
+        {'ticker': 'A', 'Perf.3M': 50.0},
+        {'ticker': 'B', 'Perf.3M': 10.0},
+        {'ticker': 'C', 'Perf.3M': 20.0},
+        {'ticker': 'D', 'Perf.3M': 99.0, 'country': 'Japan'},   # own cohort
+    ]), RUN)
+    rs = df.set_index('ticker')['rs']
+    assert rs['A'] == 30.0 and rs['B'] == -10.0 and rs['C'] == 0.0   # median 20
+    assert rs['D'] == 0.0                                            # cohort of one
+
+
+# --- notifications --------------------------------------------------------------
+
+def fake_payload(rows: list[dict]) -> dict:
+    base = {'symbol': 'TST', 'name': 'Test Corp', 'change': 2.5, 'rel_volume': 1.8,
+            'mcap': 5.2e9, 'country': 'Japan', 'streak': 1, 'earnings_in': None}
+    return {'run_date': RUN, 'stats': {'breakouts': len(rows)},
+            'breakouts': [{**base, **r} for r in rows]}
+
+
+def test_notification_lists_new_breakouts_with_earnings_flag():
+    from screener import build_notification
+    msg = build_notification(fake_payload([
+        {'symbol': 'AAA', 'earnings_in': 3.0},
+        {'symbol': 'BBB', 'streak': 4},          # not new -> excluded
+    ]), False, hist([]))
+    assert '1 new breakout' in msg and '**AAA**' in msg
+    assert 'earnings in 3d' in msg and 'BBB' not in msg
+    assert 'https://' in msg and len(msg) <= 2000
+
+
+def test_notification_none_when_nothing_new():
+    from screener import build_notification
+    assert build_notification(fake_payload([{'streak': 2}]), False, hist([])) is None
+
+
+def test_notification_monday_digest():
+    from screener import build_notification
+    h = hist([('2026-06-30', '2026-06-30', 'Breakout', 'NYSE:AAA'),
+              (RUN, RUN, 'Breakout', 'NYSE:AAA')])
+    msg = build_notification(fake_payload([{'streak': 2}]), True, h)
+    assert msg and 'most persistent: AAA' in msg
 
 
 def test_build_trails_covers_screen_tickers_only_oldest_first():
