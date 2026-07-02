@@ -52,6 +52,10 @@ NAME_STOP_TOKENS = {
     'group', 'class', 'the', '&', '(the)',
 }
 
+MEGATHREAD_RE = re.compile(
+    r'(daily|weekly).{0,30}(thread|discussion)|megathread|what are your moves',
+    re.IGNORECASE)
+
 ROOT = Path(__file__).resolve().parent
 DATA_JSON_PATH = ROOT / 'docs' / 'data.json'
 REDDIT_JSON_PATH = ROOT / 'docs' / 'reddit.json'
@@ -115,11 +119,31 @@ def search_posts(query: str, token: str | None) -> list[dict]:
         return [c['data'] for c in json.load(r)['data']['children']]
 
 
-def analyze(posts: list[dict]) -> dict | None:
+def is_relevant(p: dict, sym: str, company: str) -> bool:
+    """Reddit search tokenizes away '$' and case, so a search for '$MAP' pulls
+    every post containing the word 'map'. Only keep posts that literally
+    contain the cashtag, the symbol as an exact ALL-CAPS token, or the
+    company name."""
+    text = f"{p.get('title') or ''}\n{(p.get('selftext') or '')[:5000]}"
+    if company and len(company) >= 5 and company.lower() in text.lower():
+        return True
+    if sym.isalpha():
+        if re.search(rf'\${re.escape(sym)}\b', text, re.IGNORECASE):
+            return True
+        if len(sym) >= 3 and re.search(rf'\b{re.escape(sym)}\b', text):
+            return True     # case-sensitive: 'MAP announces...' yes, 'road map' no
+    return False
+
+
+def analyze(posts: list[dict], sym: str, company: str) -> dict | None:
     """Upvote-weighted sentiment summary + the top posts, or None if quiet."""
     scored = []
     for p in posts:
         if p.get('score', 0) < MIN_UPS:
+            continue
+        if MEGATHREAD_RE.search(p.get('title') or ''):
+            continue        # daily/weekly threads mention every ticker at once
+        if not is_relevant(p, sym, company):
             continue
         text = (p.get('title') or '') + '. ' + (p.get('selftext') or '')[:280]
         sent = _vader.polarity_scores(text)['compound']
@@ -158,7 +182,8 @@ def main() -> int:
         if not q:
             continue
         try:
-            summary = analyze(search_posts(q, token))
+            summary = analyze(search_posts(q, token),
+                              ticker.split(':')[-1].upper(), clean_company_name(name))
             if summary:
                 results[ticker] = summary
         except urllib.error.HTTPError as e:
