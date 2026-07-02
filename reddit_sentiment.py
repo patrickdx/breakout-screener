@@ -30,9 +30,11 @@ from pathlib import Path
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 SUBREDDITS = ['stocks', 'wallstreetbets', 'investing', 'StockMarket', 'ValueInvesting']
-WINDOW = 'week'
-MAX_POSTS_STORED = 5      # per ticker, by upvotes
+WINDOW = 'year'
+SEARCH_LIMIT = 50         # posts pulled per ticker before relevance filtering
+MAX_POSTS_STORED = 8      # per ticker, by upvotes
 MIN_UPS = 2               # ignore sub-noise posts
+HALF_LIFE_DAYS = 60       # sentiment weight halves every N days of post age
 BULL, BEAR = 0.15, -0.15  # weighted-score thresholds (dashboard mirrors these)
 USER_AGENT = 'breakout-screener/1.0 (github.com/patrickdx/breakout-screener)'
 
@@ -76,6 +78,14 @@ def clean_company_name(name: str) -> str:
     return out if len(out) >= 4 else ''
 
 
+def name_phrase(name: str) -> str:
+    """The company-name phrase used for matching. Ampersand names stay whole
+    ('Johnson & Johnson'), else 'Johnson' alone matches every headline about
+    the House Speaker."""
+    m = re.match(r'^([A-Za-z.\-]+(?: [A-Za-z.\-]+)? & [A-Za-z.\-]+)', str(name or ''))
+    return m.group(1) if m else clean_company_name(name)
+
+
 def build_query(ticker: str, name: str) -> str:
     """Search terms for one stock: $SYM, bare SYM when unambiguous, company name."""
     sym = ticker.split(':')[-1].upper()
@@ -84,7 +94,7 @@ def build_query(ticker: str, name: str) -> str:
         parts.append(f'"${sym}"')
         if len(sym) >= 3 and sym not in WORDY_SYMBOLS:
             parts.append(f'"{sym}"')
-    company = clean_company_name(name)
+    company = name_phrase(name)
     if company:
         parts.append(f'"{company}"')
     return ' OR '.join(parts)
@@ -110,7 +120,8 @@ def search_posts(query: str, token: str | None) -> list[dict]:
     base = ('https://oauth.reddit.com' if token else 'https://www.reddit.com')
     url = (f'{base}/r/{"+".join(SUBREDDITS)}/search.json?'
            + urllib.parse.urlencode({'q': query, 'restrict_sr': 'true',
-                                     'sort': 'top', 't': WINDOW, 'limit': 25}))
+                                     'sort': 'top', 't': WINDOW,
+                                     'limit': SEARCH_LIMIT}))
     headers = {'User-Agent': USER_AGENT}
     if token:
         headers['Authorization'] = f'bearer {token}'
@@ -125,11 +136,12 @@ def is_relevant(p: dict, sym: str, company: str) -> bool:
     tokenizes away '$' and case, so a search for '$MAP' pulls every post
     containing the word 'map' — body mentions are too loose to trust.)"""
     title = p.get('title') or ''
-    if company and len(company) >= 5:
+    phrase = name_phrase(company)
+    if phrase and len(phrase) >= 5:
         # single-word names ('Investor', 'Apple') must match case-sensitively,
         # else 'Investor AB' matches every title containing 'investors'
-        flags = re.IGNORECASE if ' ' in company else 0
-        if re.search(rf'\b{re.escape(company)}\b', title, flags):
+        flags = re.IGNORECASE if ' ' in phrase else 0
+        if re.search(rf'\b{re.escape(phrase)}\b', title, flags):
             return True
     if sym.isalpha():
         if re.search(rf'\${re.escape(sym)}\b', title, re.IGNORECASE):
@@ -139,8 +151,15 @@ def is_relevant(p: dict, sym: str, company: str) -> bool:
     return False
 
 
-def analyze(posts: list[dict], sym: str, company: str) -> dict | None:
-    """Upvote-weighted sentiment summary + the top posts, or None if quiet."""
+def analyze(posts: list[dict], sym: str, company: str,
+            now_ts: float | None = None) -> dict | None:
+    """Sentiment summary + the top posts, or None if quiet.
+
+    The gauge is weighted by upvotes AND recency (half-life HALF_LIFE_DAYS),
+    so a year-old thread still shows in the receipts but barely moves the
+    needle on *current* retail mood.
+    """
+    now_ts = now_ts or time.time()
     scored = []
     for p in posts:
         if p.get('score', 0) < MIN_UPS:
@@ -151,15 +170,19 @@ def analyze(posts: list[dict], sym: str, company: str) -> dict | None:
             continue
         text = (p.get('title') or '') + '. ' + (p.get('selftext') or '')[:280]
         sent = _vader.polarity_scores(text)['compound']
+        created = p.get('created_utc')
+        age_d = max(0, int((now_ts - created) / 86400)) if created else None
         scored.append({'t': (p.get('title') or '')[:140],
                        's': p.get('subreddit', ''),
                        'u': p.get('permalink', ''),
                        'ups': int(p.get('score', 0)),
                        'nc': int(p.get('num_comments', 0)),
+                       'age_d': age_d,
                        'sent': round(sent, 2)})
     if not scored:
         return None
-    weights = [1 + math.log10(1 + p['ups']) for p in scored]
+    weights = [(1 + math.log10(1 + p['ups']))
+               * 0.5 ** ((p['age_d'] or 0) / HALF_LIFE_DAYS) for p in scored]
     score = sum(p['sent'] * w for p, w in zip(scored, weights)) / sum(weights)
     scored.sort(key=lambda p: p['ups'], reverse=True)
     return {'score': round(score, 2), 'mentions': len(scored),
@@ -202,7 +225,7 @@ def main() -> int:
             continue
         try:
             summary = analyze(search_posts(q, token),
-                              ticker.split(':')[-1].upper(), clean_company_name(name))
+                              ticker.split(':')[-1].upper(), name)
             # scanned-but-quiet tickers get an empty entry so the dashboard can
             # distinguish "no chatter" from "not scanned"
             results[ticker] = summary or {'score': None, 'mentions': 0, 'posts': []}
