@@ -133,7 +133,8 @@
     color: var(--muted); font-size: 16px; cursor: pointer;
   }
   .panel .close:hover { color: var(--text); background: var(--hover); }
-  .p-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 4px; }
+  .p-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    margin-bottom: 4px; padding-right: 46px; /* keep clear of the ✕ button */ }
   .p-head .logo, .p-head .logo-fb { width: 44px; height: 44px; font-size: 18px; }
   .p-title { font-size: 20px; font-weight: 800; }
   .p-title a { color: var(--text); text-decoration: none; }
@@ -147,6 +148,7 @@
     border-radius: 999px; padding: 3px 11px; font-size: 12px; font-weight: 600; }
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
     gap: 10px; margin-bottom: 16px; }
+  .stats.perf { grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); margin-bottom: 0; }
   .stat { background: var(--card); border: 1px solid var(--card-border);
     border-radius: 10px; padding: 10px 12px; }
   .stat .k { color: var(--muted); font-size: 11px; font-weight: 600;
@@ -422,6 +424,17 @@ function findRow(t) {
   return DATA.breakouts.find(r => r.ticker === t) || DATA.near.find(r => r.ticker === t);
 }
 
+/* Price performance over standard windows (fields exist from 2026-07-01 on). */
+const PERF_WINDOWS = [['perf_w', '1 week'], ['perf_1m', '1 month'], ['perf_3m', '3 months'],
+                      ['perf_6m', '6 months'], ['perf_ytd', 'YTD'], ['perf_1y', '1 year']];
+
+function perfSection(r) {
+  const cells = PERF_WINDOWS.filter(([k]) => r[k] != null).map(([k, label]) =>
+    `<div class="stat"><div class="k">${label}</div>
+       <div class="v ${r[k] >= 0 ? 'up' : 'down'}">${fmtPct(r[k])}</div></div>`).join('');
+  return cells ? `<div class="sect">Price performance</div><div class="stats perf">${cells}</div>` : '';
+}
+
 function openDetail(t) {
   const r = findRow(t);
   if (!r) return;
@@ -469,6 +482,7 @@ function openDetail(t) {
         <div class="v">${r.days_near} <small>session${r.days_near > 1 ? 's' : ''}</small></div></div>
       <div class="stat"><div class="k">Market cap</div><div class="v">${fmtCap(r.mcap)}</div></div>
     </div>
+    ${perfSection(r)}
     <div class="sect">Breakout history</div>
     <div class="trailbox" id="trailbox">${trailSection(t, r)}</div>
     <div class="sect">Price chart</div>

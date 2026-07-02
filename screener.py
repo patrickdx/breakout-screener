@@ -52,10 +52,15 @@ MARKETS = [
     'australia', 'newzealand',
 ]
 
+# Scanner field -> row key for the detail panel's performance strip.
+PERF_FIELDS = {'Perf.W': 'perf_w', 'Perf.1M': 'perf_1m', 'Perf.3M': 'perf_3m',
+               'Perf.6M': 'perf_6m', 'Perf.YTD': 'perf_ytd', 'Perf.Y': 'perf_1y'}
+
 FIELDS = [
     'name', 'description', 'close', 'currency', 'change',
     'price_52_week_high', 'relative_volume_10d_calc', 'market_cap_basic',
     'sector', 'industry', 'country', 'exchange', 'logoid', 'time',
+    *PERF_FIELDS,
 ]
 
 HISTORY_COLUMNS = ['run_date', 'session_date', 'list', 'ticker',
@@ -113,6 +118,8 @@ def classify(df: pd.DataFrame, run_date: str) -> pd.DataFrame:
         'logoid': df['logoid'].fillna(''),
         'session_date': session.fillna(run_date),
     })
+    for src, dst in PERF_FIELDS.items():
+        out[dst] = df[src].astype(float).round(1)
     is_breakout = (out['dist_pct'] <= BREAKOUT_PCT) & (out['rel_volume'] > VOLUME_THRESHOLD)
     out['list'] = 'Near'
     out.loc[is_breakout, 'list'] = 'Breakout'

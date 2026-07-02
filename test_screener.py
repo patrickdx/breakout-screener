@@ -17,6 +17,8 @@ def scanner_frame(rows: list[dict]) -> pd.DataFrame:
         'market_cap_basic': 5e9, 'sector': 'Finance', 'industry': 'Banks',
         'country': 'United States', 'exchange': 'NASDAQ', 'logoid': 'test',
         'time': pd.Timestamp(f'{RUN} 13:30', tz='UTC').timestamp(),
+        'Perf.W': 2.5, 'Perf.1M': 8.0, 'Perf.3M': 15.0, 'Perf.6M': 30.0,
+        'Perf.YTD': 30.0, 'Perf.Y': 60.0,
     }
     return pd.DataFrame([{**defaults, **r} for r in rows])
 
@@ -44,6 +46,7 @@ def test_classify_splits_breakout_and_near():
     ]), RUN)
     assert df.set_index('ticker')['list'].to_dict() == {'A': 'Breakout', 'B': 'Near', 'C': 'Near'}
     assert df.set_index('ticker')['dist_pct']['C'] == 4.0
+    assert df.iloc[0]['perf_1m'] == 8.0 and df.iloc[0]['perf_1y'] == 60.0
 
 
 def test_classify_missing_relvol_is_near_not_dropped():
