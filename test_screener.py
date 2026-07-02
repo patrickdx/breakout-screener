@@ -262,8 +262,9 @@ def test_build_cohort_and_merge_prices(monkeypatch):
     import screener
     monkeypatch.setattr(screener, 'PRICES_MAX_RUNS', 2)
     h = sig_hist([(D[0], 'Breakout', 'A', 100.0, 0.1, 2.0),
-                  (D[1], 'Near', 'B', 50.0, 3.0, 1.0)])
-    assert screener.build_cohort(h) == ['A']                     # breakouts only
+                  (D[1], 'Near', 'B', 50.0, 3.0, 1.0),      # no signal either rule
+                  (D[1], 'Near', 'C', 60.0, 0.2, 3.0)])     # old-rule hit on Near list
+    assert screener.build_cohort(h) == ['A', 'C']            # both rules' signals tracked
     p = price_frame([(D[0], 'A', 1), (D[1], 'A', 2), (D[1], 'STALE', 9)])
     out = screener.merge_prices(p, {'A': 3.0}, D[1])             # re-run D[1] + prune
     assert list(out['ticker']) == ['A', 'A'] and list(out['close']) == [1, 3.0]

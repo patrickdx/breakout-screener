@@ -519,7 +519,7 @@ function openDetail(t) {
     <div class="trailbox" id="trailbox">${trailSection(t, r)}</div>
     <div class="sect">Price chart</div>
     <div class="frame"><iframe style="height:460px" loading="lazy"
-      src="https://s.tradingview.com/widgetembed/?symbol=${sym}&interval=D&theme=dark&style=1&locale=en&hide_side_toolbar=1&allow_symbol_change=0&withdateranges=1&hideideas=1&toolbarbg=131722"></iframe></div>
+      src="https://s.tradingview.com/widgetembed/?symbol=${sym}&interval=D&theme=dark&style=1&locale=en&hidesidetoolbar=1&symboledit=0&withdateranges=1&hideideas=1&toolbarbg=131722"></iframe></div>
     <div class="sect">Company & technicals</div>
     <div class="duo">
       <div class="frame">${widgetFrame('symbol-profile', t, 340)}</div>
@@ -580,7 +580,8 @@ function renderDateNav(date) {
   $('date').value = date;
   $('prev').disabled = i <= 0;
   $('next').disabled = i < 0 || i >= DATES.length - 1;
-  history.replaceState(null, '', i === DATES.length - 1 ? location.pathname : '#' + date);
+  history.replaceState(null, '', location.pathname + location.search
+    + (i === DATES.length - 1 ? '' : '#' + date));
 }
 
 function loadRun(date) {

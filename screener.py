@@ -284,10 +284,17 @@ def build_trails(history: pd.DataFrame, today: pd.DataFrame) -> dict:
 # --- forward-return tracking ---------------------------------------------------
 
 def build_cohort(history: pd.DataFrame) -> list[str]:
-    """Tickers whose forward prices we still need: breakouts in recent runs."""
-    b = history[history['list'] == 'Breakout']
-    recent = sorted(set(b['run_date']))[-COHORT_RUNS:]
-    return sorted(set(b.loc[b['run_date'].isin(recent), 'ticker']))
+    """Tickers whose forward prices we still need.
+
+    Covers classic-rule Breakouts AND old-state-rule hits (which can sit on
+    the Near list), so the old-vs-new comparison in compute_performance has
+    no survivorship gap of its own.
+    """
+    sig = history[(history['list'] == 'Breakout')
+                  | ((history['dist_pct'] <= BREAKOUT_PCT)
+                     & (history['rel_volume'] > VOLUME_THRESHOLD))]
+    recent = sorted(set(sig['run_date']))[-COHORT_RUNS:]
+    return sorted(set(sig.loc[sig['run_date'].isin(recent), 'ticker']))
 
 
 def fetch_prices(tickers: list[str]) -> dict[str, float]:
