@@ -16,9 +16,18 @@ runs [`screener.py`](screener.py):
    universe — price, 52-week high, relative volume, sector, industry, market
    cap (USD), country, currency, logo. No API key, no per-ticker downloads.
 2. Each stock is classified:
-   - **Breakout** — within **0.5%** of its 52-week high **and** volume > **1.2×**
-     its 10-day average.
-   - **Near Breakout** — within **5%** of the high.
+   - **Breakout** — the close crossed **above the prior session's 52-week
+     high** on volume > **1.2×** its 10-day average (the classic event
+     definition: a conviction close through the old ceiling — intraday wicks
+     don't count). Prior ceilings live in `data/ceilings.json`, written by
+     the previous run for every stock within 25% of its high; a ticker with
+     no stored ceiling falls back to the old state rule (within 0.5% of the
+     current high on volume).
+   - **Near Breakout** — within **5%** of the current high (the watchlist).
+
+   The old state-rule signal stays derivable from history
+   (`dist_pct <= 0.5 and rel_volume > 1.2`), so the two definitions can be
+   compared on forward returns later.
 3. Streaks are computed from the stored history (see below), results are
    written to `docs/data.json`, archived to `docs/runs/<date>.json`, and
    appended to `data/history.csv`; the job commits everything. GitHub Pages

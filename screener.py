@@ -1,18 +1,31 @@
 """Global 52-week-high breakout screener.
 
 One TradingView scanner query pulls every primary-listed common stock above
-MIN_MARKET_CAP across ~45 markets trading within PROXIMITY_PCT of its 52-week
+MIN_MARKET_CAP across ~45 markets trading within UNIVERSE_PCT of its 52-week
 high, pre-enriched with sector, industry, market cap (USD), country, currency
 and logo. No per-ticker downloads, no API key.
 
-Classification (same thresholds as the old NASDAQ/yfinance version):
-  Breakout       distance to high <= BREAKOUT_PCT and relative volume > VOLUME_THRESHOLD
-  Near Breakout  distance to high <= PROXIMITY_PCT
+Classification:
+  Breakout       close crossed ABOVE the prior session's 52-week high (the
+                 classic event definition: a conviction close through the old
+                 ceiling, so intraday wicks don't count) with relative volume
+                 > VOLUME_THRESHOLD. The prior ceiling comes from
+                 data/ceilings.json, written by the previous run; tickers
+                 without a stored ceiling (first run, or a >UNIVERSE_PCT gap)
+                 fall back to the state rule: within BREAKOUT_PCT of the
+                 current high on volume.
+  Near Breakout  within PROXIMITY_PCT of the current high (watchlist state).
+
+The old state-rule flag stays derivable from history (dist_pct <= 0.5 and
+rel_volume > 1.2), so the two definitions can be compared on forward returns.
 
 The repo is the data store:
-  data/history.csv  dated log of every run; feeds the streak columns
-  docs/data.json    today's lists + trend series, rendered by docs/index.html
-                    (GitHub Pages)
+  data/history.csv    dated log of every run; feeds the streak columns
+  data/ceilings.json  per-ticker 52-week highs from the last two runs; feeds
+                      the prior-ceiling comparison (two generations so a
+                      same-day re-run never sees its own ceilings)
+  docs/data.json      today's lists + trend series, rendered by
+                      docs/index.html (GitHub Pages)
 
 Streak semantics: continuity is counted in consecutive *runs* (a skipped run
 doesn't reset a streak) but length is counted in distinct exchange *sessions*,
@@ -28,8 +41,9 @@ from pathlib import Path
 import pandas as pd
 from tradingview_screener import Query, col
 
-BREAKOUT_PCT = 0.5        # % below 52w high to count as a breakout
+BREAKOUT_PCT = 0.5        # fallback state rule: % below 52w high
 PROXIMITY_PCT = 5.0       # % below 52w high to stay on screen at all
+UNIVERSE_PCT = 25.0       # server-side net; also the ceiling-tracking band
 VOLUME_THRESHOLD = 1.2    # today's volume vs 10-day average
 MIN_MARKET_CAP = 2_000_000_000   # USD
 HISTORY_MAX_RUNS = 500    # prune history beyond this many run dates
@@ -71,6 +85,7 @@ HISTORY_PATH = ROOT / 'data' / 'history.csv'
 DATA_JSON_PATH = ROOT / 'docs' / 'data.json'
 RUNS_DIR = ROOT / 'docs' / 'runs'
 TRAILS_PATH = ROOT / 'docs' / 'trails.json'
+CEILINGS_PATH = ROOT / 'data' / 'ceilings.json'
 
 
 def fetch() -> pd.DataFrame:
@@ -83,7 +98,7 @@ def fetch() -> pd.DataFrame:
             col('market_cap_basic') > MIN_MARKET_CAP,
             col('is_primary') == True,           # dedupe cross-listings
             col('typespecs').has('common'),      # common stock only
-            col('close').above_pct('price_52_week_high', 1 - PROXIMITY_PCT / 100),
+            col('close').above_pct('price_52_week_high', 1 - UNIVERSE_PCT / 100),
         )
         .order_by('market_cap_basic', ascending=False)
         .limit(20000)
@@ -92,11 +107,16 @@ def fetch() -> pd.DataFrame:
     return df
 
 
-def classify(df: pd.DataFrame, run_date: str) -> pd.DataFrame:
-    """Normalize scanner rows and tag each as Breakout or Near.
+def classify(df: pd.DataFrame, run_date: str,
+             prior_ceilings: dict[str, float] | None = None) -> pd.DataFrame:
+    """Normalize scanner rows, tag Breakout/Near, drop off-screen rows.
 
-    session_date is the UTC date of the row's latest exchange session; when it
-    differs from run_date the data is stale (e.g. a US holiday).
+    Breakout = close crossed above the prior session's 52-week high on
+    volume (falling back to the within-BREAKOUT_PCT state rule when no prior
+    ceiling is stored). A crosser is kept even if a same-day spike leaves the
+    close more than PROXIMITY_PCT below the *new* high. session_date is the
+    UTC date of the row's latest exchange session; when it differs from
+    run_date the data is stale (e.g. a US holiday).
     """
     high = df['price_52_week_high']
     session = pd.to_datetime(df['time'], unit='s', utc=True).dt.strftime('%Y-%m-%d')
@@ -120,10 +140,41 @@ def classify(df: pd.DataFrame, run_date: str) -> pd.DataFrame:
     })
     for src, dst in PERF_FIELDS.items():
         out[dst] = df[src].astype(float).round(1)
-    is_breakout = (out['dist_pct'] <= BREAKOUT_PCT) & (out['rel_volume'] > VOLUME_THRESHOLD)
+    prior = out['ticker'].map(prior_ceilings or {})
+    vol_ok = out['rel_volume'] > VOLUME_THRESHOLD
+    crossed = (out['price'] > prior) & vol_ok          # NaN prior compares False
+    fallback = prior.isna() & (out['dist_pct'] <= BREAKOUT_PCT) & vol_ok
     out['list'] = 'Near'
-    out.loc[is_breakout, 'list'] = 'Breakout'
-    return out
+    out.loc[crossed | fallback, 'list'] = 'Breakout'
+    on_screen = (out['list'] == 'Breakout') | (out['dist_pct'] <= PROXIMITY_PCT)
+    return out[on_screen].reset_index(drop=True)
+
+
+def load_prior_ceilings(run_date: str) -> dict[str, float]:
+    """52-week highs as of the run before this one.
+
+    The file keeps two generations: on a same-day re-run (file already dated
+    run_date) the previous generation is used, so a re-run never compares
+    closes against ceilings that already include today's session.
+    """
+    if not CEILINGS_PATH.exists():
+        return {}
+    f = json.loads(CEILINGS_PATH.read_text())
+    return f.get('prev_ceilings', {}) if f.get('date') == run_date else f.get('ceilings', {})
+
+
+def write_ceilings(run_date: str, ceilings: dict[str, float]) -> None:
+    prev_date, prev = None, {}
+    if CEILINGS_PATH.exists():
+        f = json.loads(CEILINGS_PATH.read_text())
+        if f.get('date') == run_date:          # re-run: keep the older generation
+            prev_date, prev = f.get('prev_date'), f.get('prev_ceilings', {})
+        else:
+            prev_date, prev = f.get('date'), f.get('ceilings', {})
+    CEILINGS_PATH.parent.mkdir(exist_ok=True)
+    CEILINGS_PATH.write_text(json.dumps(
+        {'date': run_date, 'ceilings': ceilings,
+         'prev_date': prev_date, 'prev_ceilings': prev}, separators=(',', ':')))
 
 
 def load_history() -> pd.DataFrame:
@@ -276,9 +327,11 @@ def main() -> int:
     if raw.empty:
         print('Scanner returned no rows.', file=sys.stderr)
         return 1
-    print(f'Universe (>${MIN_MARKET_CAP / 1e9:.0f}B, within {PROXIMITY_PCT}% of 52w high): {len(raw)}')
+    print(f'Universe (>${MIN_MARKET_CAP / 1e9:.0f}B, within {UNIVERSE_PCT}% of 52w high): {len(raw)}')
 
-    today = classify(raw, run_date)
+    prior = load_prior_ceilings(run_date)
+    today = classify(raw, run_date, prior)
+    print(f'On screen: {len(today)} | prior ceilings known: {len(prior)}')
     history = load_history()
     today = compute_streaks(history, today, run_date)
 
@@ -292,6 +345,8 @@ def main() -> int:
     write_archive(payload)
     TRAILS_PATH.write_text(json.dumps(build_trails(history, today),
                                       separators=(',', ':')))
+    write_ceilings(run_date, dict(zip(
+        raw['ticker'], raw['price_52_week_high'].astype(float).round(4))))
 
     n_b = int((today['list'] == 'Breakout').sum())
     stale = int((today['session_date'] != run_date).sum())

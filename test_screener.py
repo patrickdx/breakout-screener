@@ -55,6 +55,48 @@ def test_classify_missing_relvol_is_near_not_dropped():
     assert df.iloc[0]['list'] == 'Near'
 
 
+def test_classify_classic_rule_crosser_kept_even_far_from_new_high():
+    # Spiked to 110 (new high) but closed 99.6 — >5% off the NEW high, yet the
+    # close crossed the PRIOR ceiling of 95, so it's a breakout and stays on screen.
+    df = classify(scanner_frame([{'ticker': 'A', 'close': 99.6,
+                                  'price_52_week_high': 110.0}]),
+                  RUN, {'A': 95.0})
+    assert df.iloc[0]['list'] == 'Breakout' and df.iloc[0]['dist_pct'] > 5
+
+
+def test_classify_classic_rule_at_high_but_below_prior_ceiling_is_near():
+    # Within 0.4% of today's high on volume — the OLD rule would fire — but the
+    # close never crossed yesterday's ceiling of 100.5, so: Near.
+    df = classify(scanner_frame([{'ticker': 'A', 'close': 99.6}]),
+                  RUN, {'A': 100.5})
+    assert df.iloc[0]['list'] == 'Near'
+
+
+def test_classify_crosser_needs_volume():
+    df = classify(scanner_frame([{'ticker': 'A', 'close': 99.6,
+                                  'relative_volume_10d_calc': 1.0}]),
+                  RUN, {'A': 95.0})
+    assert df.iloc[0]['list'] == 'Near'
+
+
+def test_classify_off_screen_rows_dropped():
+    df = classify(scanner_frame([{'ticker': 'A', 'close': 90.0}]), RUN, {'A': 99.0})
+    assert df.empty                                    # 10% off high, no cross
+
+
+def test_ceilings_two_generation_rotation(tmp_path, monkeypatch):
+    import screener
+    monkeypatch.setattr(screener, 'CEILINGS_PATH', tmp_path / 'ceilings.json')
+    screener.write_ceilings('2026-06-30', {'A': 100.0})
+    screener.write_ceilings('2026-07-01', {'A': 110.0})
+    assert screener.load_prior_ceilings('2026-07-02') == {'A': 110.0}
+    # same-day re-run must see the generation BEFORE today's earlier write
+    assert screener.load_prior_ceilings('2026-07-01') == {'A': 100.0}
+    screener.write_ceilings('2026-07-01', {'A': 111.0})   # re-run overwrite
+    assert screener.load_prior_ceilings('2026-07-01') == {'A': 100.0}
+    assert screener.load_prior_ceilings('2026-07-02') == {'A': 111.0}
+
+
 def test_classify_session_date_from_bar_time():
     stale = pd.Timestamp('2026-06-30 13:30', tz='UTC').timestamp()
     df = classify(scanner_frame([{'ticker': 'A', 'time': stale},

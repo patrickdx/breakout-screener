@@ -203,7 +203,7 @@
   <div id="overlay" hidden><div class="panel" id="panel"></div></div>
 
   <footer>
-    Breakout = within <span id="f-bp"></span>% of the 52-week high with volume &gt; <span id="f-vt"></span>× its 10-day average ·
+    Breakout = close above the prior session's 52-week high on volume &gt; <span id="f-vt"></span>× its 10-day average ·
     Near = within <span id="f-pp"></span>% of the high · Streaks count distinct exchange sessions on the list.<br>
     Prices in local currency; market cap in USD. Data via TradingView's public scanner, updated each weekday after US close.
     Not investment advice. <a href="https://github.com/patrickdx/breakout-screener">Source on GitHub</a>.
@@ -555,7 +555,6 @@ function applyData(d) {
   $('subtitle').textContent =
     `Global stocks within ${d.params.proximity_pct}% of their 52-week high · ` +
     `market cap > ${fmtCap(d.params.min_market_cap)} · ${d.params.markets} markets, updated daily`;
-  $('f-bp').textContent = d.params.breakout_pct;
   $('f-vt').textContent = d.params.volume_threshold;
   $('f-pp').textContent = d.params.proximity_pct;
   fillSelect('sector', 'sector', 'All sectors');
