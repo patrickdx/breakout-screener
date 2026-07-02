@@ -66,6 +66,22 @@ earnings are within 7 days. Monday runs append a recap of the past week's
 most persistent breakouts. No secret → no post; a failed post never fails
 the run.
 
+## Reddit retail sentiment
+
+A second daily step searches each breakout's symbol and company name across
+r/stocks, r/wallstreetbets, r/investing, r/StockMarket and r/ValueInvesting
+(past week), scores every post with VADER (a social-text sentiment lexicon),
+and writes `docs/reddit.json`. The detail panel shows the upvote-weighted
+gauge (Bullish / Mixed / Bearish) with the actual posts linked underneath —
+sentiment with receipts.
+
+Reddit requires OAuth from cloud IPs, so this needs a free Reddit app:
+reddit.com/prefs/apps → create app → type **script** → copy the client id
+(under the app name) and secret into two repository secrets:
+`REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`. Without them the step skips
+gracefully and the dashboard hides the section. A ticker with no posts shows
+"no recent chatter" — for a global universe that's informative by itself.
+
 ## Extra columns
 
 - **RS 3M** — 3-month performance minus the median of the same country's

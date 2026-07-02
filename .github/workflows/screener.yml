@@ -38,6 +38,12 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python screener.py
 
+      - name: Reddit sentiment
+        env:
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+        run: python reddit_sentiment.py
+
       - name: Commit results
         run: |
           git config user.name "github-actions[bot]"

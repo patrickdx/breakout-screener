@@ -167,6 +167,13 @@
     border-radius: 12px; padding: 14px 16px; }
   .trailbox svg { display: block; width: 100%; height: 120px; }
   .trailbox .cap { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .rpost { padding: 8px 0; border-bottom: 1px solid #161b26; }
+  .rpost:last-child { border-bottom: 0; padding-bottom: 2px; }
+  .rpost a { color: var(--text); text-decoration: none; font-weight: 600; font-size: 13px; }
+  .rpost a:hover { color: var(--blue); }
+  .rpost .meta { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  .rhead { display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+    color: var(--muted); font-size: 12.5px; }
   .frame { border: 1px solid var(--card-border); border-radius: 12px; overflow: hidden;
     background: var(--card); }
   .frame iframe { display: block; width: 100%; border: 0; }
@@ -468,6 +475,46 @@ function findRow(t) {
   return DATA.breakouts.find(r => r.ticker === t) || DATA.near.find(r => r.ticker === t);
 }
 
+/* ---------- Reddit retail sentiment (lazy, docs/reddit.json) ---------- */
+let REDDIT;           // undefined = not loaded yet, null = unavailable, object = loaded
+let REDDIT_FETCHING = false;
+let PANEL_T = null;   // ticker currently shown in the detail panel
+
+function redditSection(t) {
+  if (REDDIT === undefined) return '<div class="cap">Loading Reddit chatter…</div>';
+  if (REDDIT === null) return '';
+  const r = REDDIT.results[t];
+  if (!r) return `<div class="cap">No recent chatter on ${REDDIT.subs.map(s => 'r/' + s).join(', ')}
+    in the past ${esc(REDDIT.window)} (as of ${esc(REDDIT.generated)}).</div>`;
+  const [label, cls] = r.score >= 0.15 ? ['Bullish', 'up']
+                     : r.score <= -0.15 ? ['Bearish', 'down'] : ['Mixed', 'plain'];
+  return `<div class="rhead">
+      <span class="pill ${cls === 'plain' ? 'plain' : ''}"><span class="${cls}">${label}</span></span>
+      <span>weighted sentiment <b class="${cls}">${r.score > 0 ? '+' : ''}${r.score}</b>
+        · ${r.mentions} post${r.mentions !== 1 ? 's' : ''} this ${esc(REDDIT.window)}
+        · as of ${esc(REDDIT.generated)}</span>
+    </div>` + r.posts.map(p => `<div class="rpost">
+      <a href="https://www.reddit.com${esc(p.u)}" target="_blank" rel="noopener">${esc(p.t)}</a>
+      <div class="meta">r/${esc(p.s)} · ⬆ ${p.ups} · 💬 ${p.nc} ·
+        <span class="${p.sent >= 0.15 ? 'up' : p.sent <= -0.15 ? 'down' : ''}">${p.sent > 0 ? '+' : ''}${p.sent}</span></div>
+    </div>`).join('');
+}
+
+function loadReddit() {
+  if (REDDIT !== undefined || REDDIT_FETCHING) return;
+  REDDIT_FETCHING = true;
+  getJSON('reddit.json')
+    .then(d => { REDDIT = d; })
+    .catch(() => { REDDIT = null; })
+    .finally(() => {
+      REDDIT_FETCHING = false;
+      const wrap = document.getElementById('redditwrap');
+      const box = document.getElementById('redditbox');
+      if (wrap) wrap.hidden = REDDIT === null;
+      if (box && PANEL_T) box.innerHTML = redditSection(PANEL_T);
+    });
+}
+
 /* Price performance over standard windows (fields exist from 2026-07-01 on). */
 const PERF_WINDOWS = [['perf_w', '1 week'], ['perf_1m', '1 month'], ['perf_3m', '3 months'],
                       ['perf_6m', '6 months'], ['perf_ytd', 'YTD'], ['perf_1y', '1 year']];
@@ -482,6 +529,7 @@ function perfSection(r) {
 function openDetail(t) {
   const r = findRow(t);
   if (!r) return;
+  PANEL_T = t;
   const sym = encodeURIComponent(t);
   const logo = r.logoid
     ? `<img class="logo" src="${logoUrl(r.logoid)}" alt=""
@@ -533,6 +581,10 @@ function openDetail(t) {
     ${perfSection(r)}
     <div class="sect">Breakout history</div>
     <div class="trailbox" id="trailbox">${trailSection(t, r)}</div>
+    <div id="redditwrap" ${REDDIT === null ? 'hidden' : ''}>
+      <div class="sect">Retail sentiment · Reddit</div>
+      <div class="trailbox" id="redditbox">${redditSection(t)}</div>
+    </div>
     <div class="sect">Price chart</div>
     <div class="frame"><iframe style="height:460px" loading="lazy"
       src="https://s.tradingview.com/widgetembed/?symbol=${sym}&interval=D&theme=dark&style=1&locale=en&hidesidetoolbar=1&symboledit=0&withdateranges=1&hideideas=1&toolbarbg=131722"></iframe></div>
@@ -553,12 +605,15 @@ function openDetail(t) {
       .catch(() => { TRAILS = {}; })
       .finally(() => {
         const box = document.getElementById('trailbox');
-        if (box) box.innerHTML = trailSection(t, r);
+        const rr = PANEL_T && findRow(PANEL_T);
+        if (box && rr) box.innerHTML = trailSection(PANEL_T, rr);
       });
   }
+  loadReddit();
 }
 
 function closeDetail() {
+  PANEL_T = null;
   $('overlay').hidden = true;
   $('panel').innerHTML = '';
   document.body.style.overflow = '';
