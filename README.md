@@ -79,4 +79,4 @@ Adding a dashboard column: add the field to `FIELDS` in `screener.py`, carry
 it through `classify()`, and add one entry to `COLUMNS` in
 [`docs/index.html`](docs/index.html).
 
-Not investment advice.
+Not investment advice. Made with Fable 5. $Swag
