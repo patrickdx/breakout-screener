@@ -32,12 +32,28 @@ def test_relevance_rejects_tokenizer_false_positives():
     assert not is_relevant(post('Could you be fooled by a con?'), 'CON', 'Concentra')
 
 
-def test_relevance_accepts_real_mentions():
+def test_relevance_accepts_real_mentions_in_title():
     assert is_relevant(post('$wbs is breaking out'), 'WBS', 'Webster Financial')
     assert is_relevant(post('MAP just reported record profits'), 'MAP', 'Mapfre')
     assert is_relevant(post('Mapfre looks undervalued', selftext='thesis…'), 'MAP', 'Mapfre')
-    assert is_relevant(post('thoughts?', selftext='Loading up on Webster Financial'),
-                       'WBS', 'Webster Financial')
+
+
+def test_relevance_single_word_company_names_are_case_sensitive():
+    # 'Investor AB' matched "...investors brace for..." in the wild
+    assert not is_relevant(post('Samsung falls as investors brace for tariffs'),
+                           'INVE_A', 'Investor')
+    assert not is_relevant(post('every investor should know this'), 'INVE_A', 'Investor')
+    assert is_relevant(post('Investor AB raises its stake'), 'INVE_A', 'Investor')
+    assert is_relevant(post('Bayer Supreme Court YOLO'), 'BAYN', 'Bayer')
+    # multi-word names stay case-insensitive
+    assert is_relevant(post('loading up on webster financial'), 'WBS', 'Webster Financial')
+
+
+def test_relevance_requires_title_not_body():
+    # body-only mentions don't count — the title must name the stock
+    assert not is_relevant(post('thoughts?', selftext='Loading up on Webster Financial'),
+                           'WBS', 'Webster Financial')
+    assert not is_relevant(post('my portfolio', selftext='$WBS is 20% of it'), 'WBS', '')
 
 
 def test_analyze_filters_megathreads_and_weights_by_upvotes():

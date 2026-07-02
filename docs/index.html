@@ -484,8 +484,10 @@ function redditSection(t) {
   if (REDDIT === undefined) return '<div class="cap">Loading Reddit chatter…</div>';
   if (REDDIT === null) return '';
   const r = REDDIT.results[t];
-  if (!r) return `<div class="cap">No recent chatter on ${REDDIT.subs.map(s => 'r/' + s).join(', ')}
-    in the past ${esc(REDDIT.window)} (as of ${esc(REDDIT.generated)}).</div>`;
+  if (!r) return `<div class="cap">Not in today's Reddit scan — it covers breakouts and the
+    largest / most active near-breakout names.</div>`;
+  if (!r.mentions) return `<div class="cap">Scanned ${REDDIT.subs.map(s => 'r/' + s).join(', ')} —
+    no post titles named it in the past ${esc(REDDIT.window)} (as of ${esc(REDDIT.generated)}).</div>`;
   const [label, cls] = r.score >= 0.15 ? ['Bullish', 'up']
                      : r.score <= -0.15 ? ['Bearish', 'down'] : ['Mixed', 'plain'];
   return `<div class="rhead">

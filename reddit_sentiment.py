@@ -120,17 +120,21 @@ def search_posts(query: str, token: str | None) -> list[dict]:
 
 
 def is_relevant(p: dict, sym: str, company: str) -> bool:
-    """Reddit search tokenizes away '$' and case, so a search for '$MAP' pulls
-    every post containing the word 'map'. Only keep posts that literally
-    contain the cashtag, the symbol as an exact ALL-CAPS token, or the
-    company name."""
-    text = f"{p.get('title') or ''}\n{(p.get('selftext') or '')[:5000]}"
-    if company and len(company) >= 5 and company.lower() in text.lower():
-        return True
-    if sym.isalpha():
-        if re.search(rf'\${re.escape(sym)}\b', text, re.IGNORECASE):
+    """A post counts only if its TITLE names the stock: the cashtag, the
+    symbol as an exact ALL-CAPS token, or the company name. (Reddit search
+    tokenizes away '$' and case, so a search for '$MAP' pulls every post
+    containing the word 'map' — body mentions are too loose to trust.)"""
+    title = p.get('title') or ''
+    if company and len(company) >= 5:
+        # single-word names ('Investor', 'Apple') must match case-sensitively,
+        # else 'Investor AB' matches every title containing 'investors'
+        flags = re.IGNORECASE if ' ' in company else 0
+        if re.search(rf'\b{re.escape(company)}\b', title, flags):
             return True
-        if len(sym) >= 3 and re.search(rf'\b{re.escape(sym)}\b', text):
+    if sym.isalpha():
+        if re.search(rf'\${re.escape(sym)}\b', title, re.IGNORECASE):
+            return True
+        if len(sym) >= 3 and re.search(rf'\b{re.escape(sym)}\b', title):
             return True     # case-sensitive: 'MAP announces...' yes, 'road map' no
     return False
 
@@ -162,9 +166,24 @@ def analyze(posts: list[dict], sym: str, company: str) -> dict | None:
             'posts': scored[:MAX_POSTS_STORED]}
 
 
+NEAR_BY_MCAP = 60     # biggest near-breakout names also scanned (AAPL etc.)
+NEAR_BY_VOLUME = 20   # plus the highest relative-volume near names
+
+
+def pick_targets(data: dict) -> list[dict]:
+    """All breakouts + the largest / most active near names, deduped."""
+    near = data['near']
+    picked: dict[str, dict] = {}
+    for r in (list(data['breakouts'])
+              + sorted(near, key=lambda r: -(r.get('mcap') or 0))[:NEAR_BY_MCAP]
+              + sorted(near, key=lambda r: -(r.get('rel_volume') or 0))[:NEAR_BY_VOLUME]):
+        picked.setdefault(r['ticker'], r)
+    return list(picked.values())
+
+
 def main() -> int:
     data = json.loads(DATA_JSON_PATH.read_text())
-    targets = [(r['ticker'], r['symbol'], r['name']) for r in data['breakouts']]
+    targets = [(r['ticker'], r['symbol'], r['name']) for r in pick_targets(data)]
     if not targets:
         print('No breakouts today; nothing to search.')
         return 0
@@ -184,8 +203,9 @@ def main() -> int:
         try:
             summary = analyze(search_posts(q, token),
                               ticker.split(':')[-1].upper(), clean_company_name(name))
-            if summary:
-                results[ticker] = summary
+            # scanned-but-quiet tickers get an empty entry so the dashboard can
+            # distinguish "no chatter" from "not scanned"
+            results[ticker] = summary or {'score': None, 'mentions': 0, 'posts': []}
         except urllib.error.HTTPError as e:
             failures += 1
             print(f'  {sym}: HTTP {e.code}', file=sys.stderr)
@@ -203,7 +223,8 @@ def main() -> int:
     REDDIT_JSON_PATH.write_text(json.dumps({
         'generated': data['run_date'], 'window': WINDOW, 'subs': SUBREDDITS,
         'results': results}, separators=(',', ':')))
-    print(f'Reddit sentiment: {len(results)}/{len(targets)} tickers with chatter '
+    loud = sum(1 for r in results.values() if r['mentions'])
+    print(f'Reddit sentiment: {loud}/{len(targets)} scanned tickers with chatter '
           f'-> {REDDIT_JSON_PATH.relative_to(ROOT)}')
     return 0
 
