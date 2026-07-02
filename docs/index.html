@@ -346,13 +346,22 @@ function renderTabs() {
     `<button class="${state.tab === id ? 'active' : ''}" data-tab="${id}">${label}</button>`).join('');
 }
 
+/* Countries by total domestic equity market value (WFE / Bloomberg, mid-2026).
+   Anything not listed sorts behind these, by its on-screen market cap. */
+const COUNTRY_RANK = [
+  'United States', 'China', 'Japan', 'Hong Kong', 'South Korea', 'Taiwan',
+  'India', 'Canada', 'United Kingdom', 'France', 'Germany', 'Switzerland',
+  'Saudi Arabia', 'Australia', 'Netherlands',
+];
+
 function fillSelect(id, key, allLabel, rankBy) {
   const rows = [...DATA.breakouts, ...DATA.near];
   let vals;
-  if (rankBy) {   // order by summed rankBy (e.g. total market cap), biggest first
+  if (rankBy) {   // biggest markets first; on-screen cap breaks ties past the list
     const agg = {};
     rows.forEach(r => { if (r[key]) agg[r[key]] = (agg[r[key]] || 0) + (r[rankBy] || 0); });
-    vals = Object.keys(agg).sort((a, b) => agg[b] - agg[a]);
+    const idx = v => { const i = COUNTRY_RANK.indexOf(v); return i < 0 ? COUNTRY_RANK.length : i; };
+    vals = Object.keys(agg).sort((a, b) => idx(a) - idx(b) || agg[b] - agg[a]);
   } else {
     vals = [...new Set(rows.map(r => r[key]).filter(Boolean))].sort();
   }
