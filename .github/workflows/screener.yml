@@ -38,11 +38,20 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python screener.py
 
+      - name: Cache FinBERT model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: finbert-prosusai-v1
+
       - name: Reddit sentiment
         env:
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
-        run: python reddit_sentiment.py
+        run: |
+          pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers==5.12.1
+          python reddit_sentiment.py
 
       - name: Commit results
         run: |

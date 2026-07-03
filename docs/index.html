@@ -495,8 +495,9 @@ function redditSection(t) {
   return `<div class="rhead">
       <span class="pill ${cls === 'plain' ? 'plain' : ''}"><span class="${cls}">${label}</span></span>
       <span>sentiment <b class="${cls}">${r.score > 0 ? '+' : ''}${r.score}</b>
-        (weighted by upvotes &amp; recency)
-        · ${r.mentions} post${r.mentions !== 1 ? 's' : ''} this past ${esc(REDDIT.window)}
+        (FinBERT · weighted by upvotes &amp; recency)
+        · ${r.mentions} post${r.mentions !== 1 ? 's' : ''} this past ${esc(REDDIT.window)}${
+          r.buzz != null && r.buzz >= 2 ? ` · <span class="up">🔥 ${r.buzz}× its usual pace</span>` : ''}
         · as of ${esc(REDDIT.generated)}</span>
     </div>` + r.posts.map(p => `<div class="rpost">
       <a href="https://www.reddit.com${esc(p.u)}" target="_blank" rel="noopener">${esc(p.t)}</a>

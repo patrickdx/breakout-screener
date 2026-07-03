@@ -70,10 +70,15 @@ the run.
 
 A second daily step searches each breakout's symbol and company name across
 r/stocks, r/wallstreetbets, r/investing, r/StockMarket and r/ValueInvesting
-(past week), scores every post with VADER (a social-text sentiment lexicon),
-and writes `docs/reddit.json`. The detail panel shows the upvote-weighted
-gauge (Bullish / Mixed / Bearish) with the actual posts linked underneath —
-sentiment with receipts.
+(past year), keeps only posts whose title names the stock, and scores them
+with **FinBERT** (a finance-domain transformer — benchmarks put it ~0.71
+macro-F1 on financial text vs ~0.43 for lexicons). The detail panel shows
+the gauge (Bullish / Mixed / Bearish, weighted by upvotes and a 60-day
+recency half-life) with the actual posts linked underneath — sentiment with
+receipts — plus a 🔥 buzz marker when the last 30 days run hotter than the
+ticker's own yearly pace. Per-ticker scores also append to
+`data/reddit_history.csv`, so the forward-return tracker can eventually
+test whether sentiment-tagged breakouts outperform.
 
 Reddit requires OAuth from cloud IPs, so this needs a free Reddit app:
 reddit.com/prefs/apps → create app → type **script** → copy the client id

@@ -1,3 +1,2 @@
 tradingview-screener==3.2.1
 pandas==3.0.3
-vaderSentiment==3.3.2

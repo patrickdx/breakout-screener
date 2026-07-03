@@ -5,6 +5,18 @@ from reddit_sentiment import analyze, build_query, clean_company_name, is_releva
 NOW = 1_800_000_000  # fixed clock for deterministic ages
 
 
+def stub_scorer(texts):
+    """Deterministic stand-in for FinBERT so tests never load the model."""
+    def one(t):
+        tl = t.lower()
+        if any(w in tl for w in ('amazing', 'love', 'best', 'win')):
+            return 0.8
+        if any(w in tl for w in ('terrible', 'awful', 'disaster', 'avoid')):
+            return -0.8
+        return 0.0
+    return [one(t) for t in texts]
+
+
 def post(title, ups=10, selftext='', sub='stocks', nc=3, age_days=1):
     return {'title': title, 'selftext': selftext, 'score': ups,
             'subreddit': sub, 'permalink': '/r/x/1', 'num_comments': nc,
@@ -77,7 +89,7 @@ def test_analyze_filters_megathreads_and_weights_by_upvotes():
         post('WBS crushing it, amazing earnings, love this company', ups=500),
         post('WBS is a terrible awful disaster, avoid', ups=2),
         post('Weekly Earnings Thread 6/29 - 7/3', ups=999, selftext='$WBS $AAPL'),
-    ], 'WBS', 'Webster Financial', now_ts=NOW)
+    ], 'WBS', 'Webster Financial', now_ts=NOW, scorer=stub_scorer)
     assert r['mentions'] == 2 and r['score'] > 0          # big post dominates, thread dropped
     assert r['posts'][0]['ups'] == 500                    # sorted by upvotes
     assert all(k in r['posts'][0] for k in ('t', 's', 'u', 'ups', 'nc', 'sent', 'age_d'))
@@ -89,13 +101,32 @@ def test_analyze_recency_outweighs_stale_giants():
     r = analyze([
         post('WBS is amazing, best bank, huge win', ups=800, age_days=330),
         post('WBS is a terrible awful disaster, avoid this bank', ups=800, age_days=2),
-    ], 'WBS', '', now_ts=NOW)
+    ], 'WBS', '', now_ts=NOW, scorer=stub_scorer)
     assert r['score'] < 0
     assert r['posts'][0]['age_d'] in (330, 2)             # ages recorded
 
 
 def test_analyze_quiet_noise_and_irrelevant():
-    assert analyze([], 'WBS', '', now_ts=NOW) is None
-    assert analyze([post('WBS to the moon', ups=0)], 'WBS', '', now_ts=NOW) is None  # < MIN_UPS
+    assert analyze([], 'WBS', '', now_ts=NOW, scorer=stub_scorer) is None
+    assert analyze([post('WBS to the moon', ups=0)], 'WBS', '',
+                   now_ts=NOW, scorer=stub_scorer) is None               # < MIN_UPS
     assert analyze([post('$META accepted defeat', ups=900)], 'UNI', 'Unipol',
-                   now_ts=NOW) is None
+                   now_ts=NOW, scorer=stub_scorer) is None
+
+
+def test_analyze_net_and_buzz():
+    # 3 recent posts + 1 old one: buzz = recent / (total/12) = 3 / (4/12) = 9
+    r = analyze([
+        post('WBS is amazing', ups=10, age_days=3),
+        post('WBS earnings soon', ups=10, age_days=10),
+        post('WBS breaking out', ups=10, age_days=20),
+        post('WBS was terrible back then', ups=10, age_days=200),
+    ], 'WBS', '', now_ts=NOW, scorer=stub_scorer)
+    assert r['mentions'] == 4 and r['recent_mentions'] == 3
+    assert r['buzz'] == 9.0
+    assert isinstance(r['net'], float) and r['net'] > 0   # old negative decayed
+
+def test_analyze_buzz_needs_minimum_mentions():
+    r = analyze([post('WBS is amazing', ups=10, age_days=3)],
+                'WBS', '', now_ts=NOW, scorer=stub_scorer)
+    assert r['buzz'] is None and r['mentions'] == 1

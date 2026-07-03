@@ -1,13 +1,25 @@
-"""Retail sentiment from Reddit for today's breakouts.
+"""Retail sentiment from Reddit for today's breakouts + biggest near names.
 
-For every ticker on the Breakouts list, searches the past week of SUBREDDITS
-for the symbol / company name, scores each post with VADER (lexicon sentiment
-tuned for social text), and writes docs/reddit.json:
+For every scanned ticker, searches the past year of SUBREDDITS for the
+symbol / company name, scores each relevant post with FinBERT (a finance-
+domain transformer; benchmarks put it ~0.71 macro-F1 on financial text vs
+~0.43 for lexicons like VADER), and writes docs/reddit.json:
 
-  {generated, window, subs, results: {ticker: {score, mentions, posts[]}}}
+  {generated, window, subs,
+   results: {ticker: {score, net, mentions, recent_mentions, buzz, posts[]}}}
 
-`score` is the upvote-weighted mean VADER compound (-1..1); posts carry their
-own score so the dashboard can show the gauge next to the receipts.
+score  upvote+recency-weighted mean of per-post FinBERT scores (-1..1);
+       drives the Bullish/Mixed/Bearish label.
+net    weighted SUM — Long, Lucey & Yarovaya (2023) found engagement-scaled
+       net sentiment moves returns where plain averages don't. Unbounded;
+       stored for analysis rather than display.
+buzz   mentions in the last 30 days vs the ticker's own monthly average over
+       the window (Goyal et al. 2025: sentiment x volume-change beats
+       sentiment level). Null when the ticker has < 3 posts overall.
+
+Each run also appends per-ticker rows to data/reddit_history.csv so the
+forward-return tracker can later test whether sentiment/buzz-tagged
+breakouts actually outperform.
 
 Auth: uses Reddit's free OAuth app credentials when REDDIT_CLIENT_ID /
 REDDIT_CLIENT_SECRET are set (required on cloud IPs — create a "script" app
@@ -16,6 +28,7 @@ at reddit.com/prefs/apps); falls back to the public JSON endpoint otherwise
 previous reddit.json is left untouched and the exit code is still 0.
 """
 import base64
+import csv
 import json
 import math
 import os
@@ -27,15 +40,16 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-
 SUBREDDITS = ['stocks', 'wallstreetbets', 'investing', 'StockMarket', 'ValueInvesting']
 WINDOW = 'year'
 SEARCH_LIMIT = 50         # posts pulled per ticker before relevance filtering
 MAX_POSTS_STORED = 8      # per ticker, by upvotes
 MIN_UPS = 2               # ignore sub-noise posts
 HALF_LIFE_DAYS = 60       # sentiment weight halves every N days of post age
+BUZZ_WINDOW_DAYS = 30     # "recent" window for the buzz ratio
+BUZZ_MIN_MENTIONS = 3     # need this many posts overall before buzz means anything
 BULL, BEAR = 0.15, -0.15  # weighted-score thresholds (dashboard mirrors these)
+FINBERT_MODEL = 'ProsusAI/finbert'
 USER_AGENT = 'breakout-screener/1.0 (github.com/patrickdx/breakout-screener)'
 
 # Symbols that read as English words drown in false matches — for these only
@@ -61,8 +75,42 @@ MEGATHREAD_RE = re.compile(
 ROOT = Path(__file__).resolve().parent
 DATA_JSON_PATH = ROOT / 'docs' / 'data.json'
 REDDIT_JSON_PATH = ROOT / 'docs' / 'reddit.json'
+REDDIT_HISTORY_PATH = ROOT / 'data' / 'reddit_history.csv'
+HISTORY_COLUMNS = ['run_date', 'ticker', 'score', 'net', 'mentions',
+                   'recent_mentions', 'buzz']
 
-_vader = SentimentIntensityAnalyzer()
+_finbert = None
+
+
+def finbert_scorer():
+    """Batch scorer: texts -> P(positive) - P(negative) per text, in [-1, 1].
+
+    Lazy singleton so importing this module (e.g. in tests) never touches
+    torch/transformers or downloads the model.
+    """
+    global _finbert
+    if _finbert is None:
+        import torch
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(FINBERT_MODEL)
+        model = AutoModelForSequenceClassification.from_pretrained(FINBERT_MODEL)
+        model.eval()
+        labels = {i: l.lower() for i, l in model.config.id2label.items()}
+
+        def score(texts: list[str]) -> list[float]:
+            out: list[float] = []
+            with torch.no_grad():
+                for i in range(0, len(texts), 16):
+                    enc = tok(texts[i:i + 16], return_tensors='pt', padding=True,
+                              truncation=True, max_length=128)
+                    probs = torch.softmax(model(**enc).logits, dim=-1)
+                    for row in probs:
+                        d = {labels[j]: float(row[j]) for j in range(len(row))}
+                        out.append(d.get('positive', 0.0) - d.get('negative', 0.0))
+            return out
+
+        _finbert = score
+    return _finbert
 
 
 def clean_company_name(name: str) -> str:
@@ -152,15 +200,16 @@ def is_relevant(p: dict, sym: str, company: str) -> bool:
 
 
 def analyze(posts: list[dict], sym: str, company: str,
-            now_ts: float | None = None) -> dict | None:
+            now_ts: float | None = None, scorer=None) -> dict | None:
     """Sentiment summary + the top posts, or None if quiet.
 
     The gauge is weighted by upvotes AND recency (half-life HALF_LIFE_DAYS),
     so a year-old thread still shows in the receipts but barely moves the
-    needle on *current* retail mood.
+    needle on *current* retail mood. `scorer` maps a list of texts to
+    [-1, 1] scores (FinBERT by default; injectable for tests).
     """
     now_ts = now_ts or time.time()
-    scored = []
+    eligible = []
     for p in posts:
         if p.get('score', 0) < MIN_UPS:
             continue
@@ -168,8 +217,15 @@ def analyze(posts: list[dict], sym: str, company: str,
             continue        # daily/weekly threads mention every ticker at once
         if not is_relevant(p, sym, company):
             continue
-        text = (p.get('title') or '') + '. ' + (p.get('selftext') or '')[:280]
-        sent = _vader.polarity_scores(text)['compound']
+        eligible.append(p)
+    if not eligible:
+        return None
+
+    scorer = scorer or finbert_scorer()
+    sents = scorer([(p.get('title') or '') + '. ' + (p.get('selftext') or '')[:280]
+                    for p in eligible])
+    scored = []
+    for p, sent in zip(eligible, sents):
         created = p.get('created_utc')
         age_d = max(0, int((now_ts - created) / 86400)) if created else None
         scored.append({'t': (p.get('title') or '')[:140],
@@ -179,13 +235,19 @@ def analyze(posts: list[dict], sym: str, company: str,
                        'nc': int(p.get('num_comments', 0)),
                        'age_d': age_d,
                        'sent': round(sent, 2)})
-    if not scored:
-        return None
+
     weights = [(1 + math.log10(1 + p['ups']))
                * 0.5 ** ((p['age_d'] or 0) / HALF_LIFE_DAYS) for p in scored]
-    score = sum(p['sent'] * w for p, w in zip(scored, weights)) / sum(weights)
+    net = sum(p['sent'] * w for p, w in zip(scored, weights))
+    recent = sum(1 for p in scored
+                 if p['age_d'] is not None and p['age_d'] <= BUZZ_WINDOW_DAYS)
+    buzz = None
+    if len(scored) >= BUZZ_MIN_MENTIONS:
+        monthly_avg = len(scored) / 12          # posts per BUZZ_WINDOW over the year
+        buzz = round(recent / monthly_avg, 1)
     scored.sort(key=lambda p: p['ups'], reverse=True)
-    return {'score': round(score, 2), 'mentions': len(scored),
+    return {'score': round(net / sum(weights), 2), 'net': round(net, 2),
+            'mentions': len(scored), 'recent_mentions': recent, 'buzz': buzz,
             'posts': scored[:MAX_POSTS_STORED]}
 
 
@@ -228,7 +290,9 @@ def main() -> int:
                               ticker.split(':')[-1].upper(), name)
             # scanned-but-quiet tickers get an empty entry so the dashboard can
             # distinguish "no chatter" from "not scanned"
-            results[ticker] = summary or {'score': None, 'mentions': 0, 'posts': []}
+            results[ticker] = summary or {'score': None, 'net': None, 'mentions': 0,
+                                          'recent_mentions': 0, 'buzz': None,
+                                          'posts': []}
         except urllib.error.HTTPError as e:
             failures += 1
             print(f'  {sym}: HTTP {e.code}', file=sys.stderr)
@@ -246,10 +310,32 @@ def main() -> int:
     REDDIT_JSON_PATH.write_text(json.dumps({
         'generated': data['run_date'], 'window': WINDOW, 'subs': SUBREDDITS,
         'results': results}, separators=(',', ':')))
+    append_history(data['run_date'], results)
     loud = sum(1 for r in results.values() if r['mentions'])
     print(f'Reddit sentiment: {loud}/{len(targets)} scanned tickers with chatter '
           f'-> {REDDIT_JSON_PATH.relative_to(ROOT)}')
     return 0
+
+
+def append_history(run_date: str, results: dict) -> None:
+    """Log per-ticker sentiment to data/reddit_history.csv (idempotent per
+    run_date) so the forward-return tracker can slice signals by sentiment."""
+    rows = []
+    if REDDIT_HISTORY_PATH.exists():
+        with open(REDDIT_HISTORY_PATH) as f:
+            rows = [r for r in csv.DictReader(f) if r['run_date'] != run_date]
+    for ticker, r in sorted(results.items()):
+        rows.append({'run_date': run_date, 'ticker': ticker,
+                     'score': r['score'] if r['score'] is not None else '',
+                     'net': r['net'] if r['net'] is not None else '',
+                     'mentions': r['mentions'],
+                     'recent_mentions': r['recent_mentions'],
+                     'buzz': r['buzz'] if r['buzz'] is not None else ''})
+    REDDIT_HISTORY_PATH.parent.mkdir(exist_ok=True)
+    with open(REDDIT_HISTORY_PATH, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=HISTORY_COLUMNS)
+        w.writeheader()
+        w.writerows(rows)
 
 
 if __name__ == '__main__':
