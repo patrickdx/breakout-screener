@@ -109,6 +109,7 @@
   }
   .pill.new { background: rgba(96,165,250,.15); color: var(--blue); }
   .pill.streak { background: rgba(251,191,36,.13); color: var(--amber); }
+  .pill.near { background: rgba(148,163,184,.13); color: var(--muted); }
   .pill.plain { background: #1d2431; color: var(--muted); }
 
   .more { display: block; margin: 0 auto; padding: 10px 22px; margin-top: 16px;
@@ -288,8 +289,11 @@ const COLUMNS = [
         : `<span class="${r.rs >= 0 ? 'up' : 'down'}"
              title="3-month performance vs the median of its country's near-high peers">${fmtPct(r.rs)}</span>` },
   { label: 'Streak', sort: r => r.streak || r.days_near, render: (r, ctx) => {
-      if (ctx.tab === 'near')
-        return `<span class="pill plain">${r.days_near}d</span>`;
+      if (ctx.tab === 'near') {
+        if (r.days_near === 1) return '<span class="pill new">NEW</span>';
+        const since = r.near_start ? ` title="Near the high since ${esc(r.near_start)}"` : '';
+        return `<span class="pill near"${since}>⏳ ${r.days_near}</span>`;
+      }
       if (r.streak === 1) return '<span class="pill new">NEW</span>';
       return `<span class="pill streak" title="Breakout since ${esc(r.streak_start)}">🔥 ${r.streak}</span>`;
     } },
@@ -468,7 +472,10 @@ function trailSection(t, row) {
   return trailChart(trail) + `<div class="cap">
     Dot per run on screen (🟡 breakout · ⚪ near), higher = closer to the 52-week high ·
     ${trail.length} appearance${trail.length > 1 ? 's' : ''} since ${trail[0][0]},
-    ${nB} as breakout${row.streak > 1 ? ` · current streak ${row.streak} sessions (since ${esc(row.streak_start)})` : ''}</div>`;
+    ${nB} as breakout${row.streak > 1
+      ? ` · current streak ${row.streak} sessions (since ${esc(row.streak_start)})`
+      : !row.streak && row.days_near > 1 && row.near_start
+        ? ` · near the high ${row.days_near} sessions (since ${esc(row.near_start)})` : ''}</div>`;
 }
 
 function findRow(t) {
@@ -581,7 +588,8 @@ function openDetail(t) {
         <div class="v ${r.rs >= 0 ? 'up' : 'down'}">${r.rs == null ? '–' : fmtPct(r.rs)}</div></div>
       <div class="stat"><div class="k">Breakout streak</div><div class="v">${streakStat}</div></div>
       <div class="stat"><div class="k">On screen</div>
-        <div class="v">${r.days_near} <small>session${r.days_near > 1 ? 's' : ''}</small></div></div>
+        <div class="v">${r.days_near} <small>session${r.days_near > 1 ? 's' : ''}${
+          r.days_near === 1 ? ' · NEW' : r.near_start ? ' · since ' + esc(r.near_start) : ''}</small></div></div>
       <div class="stat"><div class="k">Market cap</div><div class="v">${fmtCap(r.mcap)}</div></div>
     </div>
     ${perfSection(r)}

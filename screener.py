@@ -218,12 +218,13 @@ def load_history() -> pd.DataFrame:
 
 def compute_streaks(history: pd.DataFrame, today: pd.DataFrame,
                     run_date: str) -> pd.DataFrame:
-    """Add streak / days_near / streak_start columns from stored history.
+    """Add streak / days_near / streak_start / near_start columns from history.
 
     streak       distinct sessions on the Breakouts list over trailing
                  consecutive runs, incl. today (0 for Near rows)
     days_near    same, but for appearing on either list
     streak_start run date the current breakout streak began ('' for Near rows)
+    near_start   run date the current on-screen streak began (all rows)
     """
     prior = history[history['run_date'] != run_date]  # idempotent re-runs
     run_dates = sorted(prior['run_date'].unique())
@@ -247,10 +248,11 @@ def compute_streaks(history: pd.DataFrame, today: pd.DataFrame,
                 break
         return runs, sessions
 
-    streaks, days_near, starts = [], [], []
+    streaks, days_near, starts, near_starts = [], [], [], []
     for t, sess, lst in zip(today['ticker'], today['session_date'], today['list']):
         runs_on, sess_on = trailing('onscreen', t)
         days_near.append(len(sess_on | {sess}))
+        near_starts.append(runs_on[-1] if runs_on else run_date)
         if lst == 'Breakout':
             runs_b, sess_b = trailing('breakout', t)
             streaks.append(len(sess_b | {sess}))
@@ -262,6 +264,7 @@ def compute_streaks(history: pd.DataFrame, today: pd.DataFrame,
     today['streak'] = streaks
     today['days_near'] = days_near
     today['streak_start'] = starts
+    today['near_start'] = near_starts
     return today
 
 
@@ -509,7 +512,8 @@ def build_payload(today: pd.DataFrame, trend: list[dict], run_date: str,
                   generated: str, backfilled: bool = False) -> dict:
     breakouts = today[today['list'] == 'Breakout'].sort_values(
         ['streak', 'dist_pct'], ascending=[False, True])
-    near = today[today['list'] == 'Near'].sort_values('dist_pct')
+    near = today[today['list'] == 'Near'].sort_values(
+        ['days_near', 'dist_pct'], ascending=[False, True])
 
     def records(df: pd.DataFrame) -> list[dict]:
         cols = [c for c in df.columns if c != 'list']

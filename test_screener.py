@@ -168,6 +168,28 @@ def test_same_day_rerun_ignores_own_rows():
     assert streak_of(today, 'A') == (1, 1, RUN)
 
 
+def test_near_start_anchors_on_screen_streak():
+    # On screen since 06-29 (Near, then Breakout), Near again today.
+    h = hist([('2026-06-29', '2026-06-29', 'Near', 'A'),
+              ('2026-06-30', '2026-06-30', 'Breakout', 'A')])
+    today = compute_streaks(h, today_frame([('A', 'Near', RUN)]), RUN)
+    row = today.iloc[0]
+    assert row['near_start'] == '2026-06-29' and row['days_near'] == 3
+
+
+def test_near_start_is_today_for_first_appearance():
+    today = compute_streaks(hist([]), today_frame([('A', 'Near', RUN)]), RUN)
+    assert today.iloc[0]['near_start'] == RUN and today.iloc[0]['days_near'] == 1
+
+
+def test_near_start_resets_after_off_screen_gap():
+    # A on screen 06-27, absent from the 06-30 run -> streak restarts today.
+    h = hist([('2026-06-27', '2026-06-27', 'Near', 'A'),
+              ('2026-06-30', '2026-06-30', 'Near', 'B')])
+    today = compute_streaks(h, today_frame([('A', 'Near', RUN)]), RUN)
+    assert today.iloc[0]['near_start'] == RUN and today.iloc[0]['days_near'] == 1
+
+
 # --- update_history -----------------------------------------------------------
 
 def test_update_history_is_idempotent_for_reruns():
