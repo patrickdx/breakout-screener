@@ -359,9 +359,8 @@ function rows() {
 function renderTable() {
   const ctx = { tab: state.tab, run_date: DATA.run_date, proximity: DATA.params.proximity_pct };
   $('head').innerHTML = COLUMNS.map((c, i) => {
-    const label = c.label === 'Streak' && state.tab === 'near' ? 'On screen' : c.label;
     const arrow = state.sortCol === i ? ` <span class="arrow">${state.sortDir > 0 ? '▲' : '▼'}</span>` : '';
-    return `<th class="${c.left ? 'left' : ''}" data-i="${i}">${label}${arrow}</th>`;
+    return `<th class="${c.left ? 'left' : ''}" data-i="${i}">${c.label}${arrow}</th>`;
   }).join('');
 
   const all = rows();
