@@ -511,7 +511,7 @@ def build_trend(history: pd.DataFrame) -> list[dict]:
 def build_payload(today: pd.DataFrame, trend: list[dict], run_date: str,
                   generated: str, backfilled: bool = False) -> dict:
     breakouts = today[today['list'] == 'Breakout'].sort_values(
-        ['streak', 'dist_pct'], ascending=[False, True])
+        ['days_near', 'dist_pct'], ascending=[False, True])
     near = today[today['list'] == 'Near'].sort_values(
         ['days_near', 'dist_pct'], ascending=[False, True])
 

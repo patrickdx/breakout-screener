@@ -111,7 +111,6 @@
   }
   .pill.new { background: rgba(96,165,250,.15); color: var(--blue); }
   .pill.streak { background: rgba(251,191,36,.13); color: var(--amber); }
-  .pill.near { background: rgba(148,163,184,.13); color: var(--muted); }
   .pill.plain { background: #1d2431; color: var(--muted); }
   .since { font-size: 10.5px; color: var(--faint); margin-top: 2px; }
 
@@ -296,17 +295,12 @@ const COLUMNS = [
       r.rs == null ? '–'
         : `<span class="${r.rs >= 0 ? 'up' : 'down'}"
              title="3-month performance vs the median of its country's near-high peers">${fmtPct(r.rs)}</span>` },
-  { label: 'Streak', desc: true, sort: r => r.streak || r.days_near,
-    title: tab => tab === 'near'
-      ? 'Days in a row this stock has stayed within 5% of its 52-week high'
-      : 'Days in a row this stock has closed as a breakout',
-    render: (r, ctx) => {
-      const near = ctx.tab === 'near';
-      const n = near ? r.days_near : r.streak;
-      const start = near ? r.near_start : r.streak_start;
-      if (n === 1) return '<span class="pill new">NEW</span><div class="since">first day</div>';
-      const since = start ? `<div class="since">since ${fmtDate(start)}</div>` : '';
-      return `<span class="pill ${near ? 'near' : 'streak'}">${near ? '⏳' : '🔥'} ${n} days</span>${since}`;
+  { label: 'Streak', desc: true, sort: r => r.days_near,
+    title: 'Days in a row this stock has been on screen — as a breakout or near the 52-week high',
+    render: r => {
+      if (r.days_near === 1) return '<span class="pill new">NEW</span><div class="since">first day</div>';
+      const since = r.near_start ? `<div class="since">since ${fmtDate(r.near_start)}</div>` : '';
+      return `<span class="pill streak">🔥 ${r.days_near} days</span>${since}`;
     } },
   { label: 'Mkt Cap', desc: true, sort: r => r.mcap, render: r => fmtCap(r.mcap) },
   { label: 'Sector', left: true, sort: r => r.sector, render: r =>

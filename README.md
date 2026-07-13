@@ -52,13 +52,14 @@ column jumps straight to TradingView.
   stale data (US holiday, same-day re-run) can never inflate a streak.
 - Re-running the job on the same day replaces that day's rows (idempotent).
 
-Near-list rows get the same treatment: the Streak column shows how many
-sessions a stock has been hovering on screen (⏳, NEW on its first day, with a
-`near_start` anchor date), and the Near tab sorts longest-hovering first — a
-long near-streak is a base forming under the 52-week high. `Days on screen`
-is that same count in the detail panel; `streak_start` is the date the current
-breakout streak began. On the very first run every streak is 1; it accrues
-from there. History is pruned beyond `HISTORY_MAX_RUNS` (500) run dates.
+The dashboard's Streak column shows one number on both tabs: consecutive
+sessions the stock has appeared on screen — as a breakout or near the high
+(`days_near`, anchored by `near_start`; NEW on its first day). Both tabs sort
+longest streak first by default — a long streak is a base forming under the
+52-week high. The breakout-only streak (`streak`, since `streak_start`) still
+drives NEW-breakout notifications and shows in the detail panel. On the very
+first run every streak is 1; it accrues from there. History is pruned beyond
+`HISTORY_MAX_RUNS` (500) run dates.
 
 ## Notifications
 
