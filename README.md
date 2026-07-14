@@ -19,7 +19,7 @@ runs [`screener.py`](screener.py):
    - **Breakout** — the close crossed **above the prior session's 52-week
      high** on volume > **1.2×** its 10-day average (the classic event
      definition: a conviction close through the old ceiling — intraday wicks
-     don't count). Prior ceilings live in `data/ceilings.json`, written by
+     don't count). Prior ceilings live in the `ceilings` table, written by
      the previous run for every stock within 25% of its high; a ticker with
      no stored ceiling falls back to the old state rule (within 0.5% of the
      current high on volume).
@@ -28,23 +28,31 @@ runs [`screener.py`](screener.py):
    The old state-rule signal stays derivable from history
    (`dist_pct <= 0.5 and rel_volume > 1.2`), so the two definitions can be
    compared on forward returns later.
-3. Streaks are computed from the stored history (see below), results are
-   written to `docs/data.json`, archived to `docs/runs/<date>.json`, and
-   appended to `data/history.csv`; the job commits everything. GitHub Pages
-   serves [`docs/`](docs/) as the dashboard.
+3. Streaks are computed from the stored history (see below), everything is
+   written to the database, and the run then exports the JSON the dashboard
+   reads (`docs/data.json`, `docs/runs/<date>.json`, `docs/trails.json`,
+   `docs/performance.json`); the job commits it all. GitHub Pages serves
+   [`docs/`](docs/) as the dashboard.
 
-**The repo is the data store.** No database, no server, no secrets. The
-dashboard's date picker cycles through the archived runs (one per trading
-day, kept for the last `ARCHIVE_MAX_RUNS` = 120 runs). Clicking a row opens
-a detail panel: streak stats, price performance (1W–1Y), an appearance-trail chart fed by
+**The repo is the data store; the database is the backend's memory.** All
+screener state lives in one SQLite file, [`data/screener.db`](data/)
+(tables: `history`, `prices`, `ceilings` — see [`db.py`](db.py)), committed
+by CI like any other artifact. No server, no secrets; each run's writes are
+transactional, so a crashed run can't leave the stores torn. GitHub Pages
+can't query a database — it only serves files — so the dashboard never
+touches the `.db`. Instead each run exports small JSON views of the data
+into `docs/`, and the static page fetches those. The date picker cycles
+through the archived runs (one per trading day, kept for the last
+`ARCHIVE_MAX_RUNS` = 120 runs). Clicking a row opens a detail panel: streak
+stats, price performance (1W–1Y), an appearance-trail chart fed by
 `docs/trails.json`, and TradingView's embedded price chart, company profile
 and technicals gauge. Panels are deep-linkable (`?t=NASDAQ:AAPL`); the ↗
 column jumps straight to TradingView.
 
 ## Streaks
 
-`Breakout Streak` is real memory across runs, read back from
-`data/history.csv`:
+`Breakout Streak` is real memory across runs, read back from the `history`
+table:
 
 - **Continuity** is counted in consecutive *runs* — a skipped run (CI outage)
   doesn't reset a streak.
@@ -84,12 +92,13 @@ Home Screen" on a phone gives it an app icon and standalone window.
 
 ## Signal performance (benchmark-adjusted forward returns)
 
-Every ticker that fires a Breakout stays in a daily price log
-(`data/prices.csv`) for `COHORT_RUNS` (70) runs — **even after it falls off
+Every ticker that fires a Breakout stays in a daily price log (the `prices`
+table) for `COHORT_RUNS` (70) runs — **even after it falls off
 screen**, so failed breakouts stay measurable and the stats carry no
 survivorship bias. Benchmark ETFs (QQQ, ACWI) are logged as ordinary rows.
 
-Each run recomputes `docs/performance.json`: for every signal old enough,
+Each run recomputes `docs/performance.json`: for
+every signal old enough,
 excess return = the stock's +5/+20/+60-run return **minus the benchmark's
 return over the same window**, aggregated into hit rate / median / mean per
 group (all breakouts, first-day signals, continuation days, and the old
@@ -114,8 +123,16 @@ pre-tracking. The dashboard renders the table once numbers exist.
 
 ```bash
 pip install -r requirements.txt
-python screener.py          # writes data/history.csv + docs/data.json
+python screener.py          # writes data/screener.db + docs/*.json
 python -m http.server -d docs 8000   # view at http://localhost:8000
+```
+
+Poke at the database directly:
+
+```bash
+sqlite3 data/screener.db "SELECT ticker, COUNT(DISTINCT session_date) AS sessions
+                          FROM history WHERE list='Breakout'
+                          GROUP BY ticker ORDER BY sessions DESC LIMIT 10"
 ```
 
 Tests (pure logic, no network): `pip install pytest && pytest -q`.
@@ -126,7 +143,7 @@ Constants at the top of [`screener.py`](screener.py): `BREAKOUT_PCT`,
 `PROXIMITY_PCT`, `VOLUME_THRESHOLD`, `MIN_MARKET_CAP`, `MARKETS`.
 
 Adding a dashboard column: add the field to `FIELDS` in `screener.py`, carry
-it through `classify()`, and add one entry to `COLUMNS` in
-[`docs/index.html`](docs/index.html).
+it through `classify()` (it flows into the exported JSON automatically), and
+add one entry to `COLUMNS` in [`docs/index.html`](docs/index.html).
 
 Not investment advice. Made with Fable 5. $Swag

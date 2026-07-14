@@ -19,13 +19,18 @@ Classification:
 The old state-rule flag stays derivable from history (dist_pct <= 0.5 and
 rel_volume > 1.2), so the two definitions can be compared on forward returns.
 
-The repo is the data store:
-  data/history.csv    dated log of every run; feeds the streak columns
-  data/ceilings.json  per-ticker 52-week highs from the last two runs; feeds
-                      the prior-ceiling comparison (two generations so a
-                      same-day re-run never sees its own ceilings)
-  docs/data.json      today's lists + trend series, rendered by
-                      docs/index.html (GitHub Pages)
+The repo is the data store. The backend's memory lives in one SQLite
+database (see db.py):
+  data/screener.db    tables: history (feeds the streak columns), prices
+                      (feeds the forward-return tracker), ceilings (feeds
+                      the prior-ceiling comparison)
+Each run then exports the display views the static dashboard fetches — it
+never reads the database:
+  docs/data.json       latest run's lists + trend series
+  docs/runs/<date>.json  per-run archive for the date picker
+  docs/trails.json     per-ticker appearance trails for the detail panel
+  docs/performance.json  benchmark-adjusted forward-return stats
+docs/index.html renders them (GitHub Pages).
 
 Streak semantics: continuity is counted in consecutive *runs* (a skipped run
 doesn't reset a streak) but length is counted in distinct exchange *sessions*,
@@ -42,6 +47,9 @@ from pathlib import Path
 
 import pandas as pd
 from tradingview_screener import Query, col
+
+import db
+from db import HISTORY_COLUMNS
 
 BREAKOUT_PCT = 0.5        # fallback state rule: % below 52w high
 PROXIMITY_PCT = 5.0       # % below 52w high to stay on screen at all
@@ -96,18 +104,13 @@ FIELDS = [
 EARNINGS_MAX_DAYS = 90    # ignore earnings dates further out than this
 EARNINGS_SOON_DAYS = 7    # dashboard/notification warning threshold
 
-HISTORY_COLUMNS = ['run_date', 'session_date', 'list', 'ticker',
-                   'price', 'dist_pct', 'rel_volume', 'rs']
-
 DASHBOARD_URL = 'https://patrickdx.github.io/breakout-screener/'
 
 ROOT = Path(__file__).resolve().parent
-HISTORY_PATH = ROOT / 'data' / 'history.csv'
+DB_PATH = ROOT / 'data' / 'screener.db'
 DATA_JSON_PATH = ROOT / 'docs' / 'data.json'
 RUNS_DIR = ROOT / 'docs' / 'runs'
 TRAILS_PATH = ROOT / 'docs' / 'trails.json'
-CEILINGS_PATH = ROOT / 'data' / 'ceilings.json'
-PRICES_PATH = ROOT / 'data' / 'prices.csv'
 PERFORMANCE_PATH = ROOT / 'docs' / 'performance.json'
 
 
@@ -180,40 +183,6 @@ def classify(df: pd.DataFrame, run_date: str,
     out.loc[crossed | fallback, 'list'] = 'Breakout'
     on_screen = (out['list'] == 'Breakout') | (out['dist_pct'] <= PROXIMITY_PCT)
     return out[on_screen].reset_index(drop=True)
-
-
-def load_prior_ceilings(run_date: str) -> dict[str, float]:
-    """52-week highs as of the run before this one.
-
-    The file keeps two generations: on a same-day re-run (file already dated
-    run_date) the previous generation is used, so a re-run never compares
-    closes against ceilings that already include today's session.
-    """
-    if not CEILINGS_PATH.exists():
-        return {}
-    f = json.loads(CEILINGS_PATH.read_text())
-    return f.get('prev_ceilings', {}) if f.get('date') == run_date else f.get('ceilings', {})
-
-
-def write_ceilings(run_date: str, ceilings: dict[str, float]) -> None:
-    prev_date, prev = None, {}
-    if CEILINGS_PATH.exists():
-        f = json.loads(CEILINGS_PATH.read_text())
-        if f.get('date') == run_date:          # re-run: keep the older generation
-            prev_date, prev = f.get('prev_date'), f.get('prev_ceilings', {})
-        else:
-            prev_date, prev = f.get('date'), f.get('ceilings', {})
-    CEILINGS_PATH.parent.mkdir(exist_ok=True)
-    CEILINGS_PATH.write_text(json.dumps(
-        {'date': run_date, 'ceilings': ceilings,
-         'prev_date': prev_date, 'prev_ceilings': prev}, separators=(',', ':')))
-
-
-def load_history() -> pd.DataFrame:
-    if not HISTORY_PATH.exists():
-        return pd.DataFrame(columns=HISTORY_COLUMNS)
-    return pd.read_csv(HISTORY_PATH, dtype={'run_date': str, 'session_date': str,
-                                            'list': str, 'ticker': str})
 
 
 def compute_streaks(history: pd.DataFrame, today: pd.DataFrame,
@@ -329,12 +298,6 @@ def fetch_prices(tickers: list[str]) -> dict[str, float]:
         closes.update({r.ticker: float(r.close) for r in df.itertuples()
                        if pd.notna(r.close)})
     return closes
-
-
-def load_prices() -> pd.DataFrame:
-    if not PRICES_PATH.exists():
-        return pd.DataFrame(columns=['run_date', 'ticker', 'close'])
-    return pd.read_csv(PRICES_PATH, dtype={'run_date': str, 'ticker': str})
 
 
 def merge_prices(prices: pd.DataFrame, closes: dict[str, float],
@@ -565,30 +528,34 @@ def main() -> int:
         return 1
     print(f'Universe (>${MIN_MARKET_CAP / 1e9:.0f}B, within {UNIVERSE_PCT}% of 52w high): {len(raw)}')
 
-    prior = load_prior_ceilings(run_date)
+    con = db.connect(DB_PATH)
+    prior = db.load_prior_ceilings(con, run_date)
     today = classify(raw, run_date, prior)
     print(f'On screen: {len(today)} | prior ceilings known: {len(prior)}')
-    history = load_history()
+    history = db.load_history(con)
     today = compute_streaks(history, today, run_date)
 
+    # --- persist to the database (source of truth) ---
     history = update_history(history, today, run_date)
-    HISTORY_PATH.parent.mkdir(exist_ok=True)
-    history.to_csv(HISTORY_PATH, index=False)
+    db.save_history(con, history)
+    db.write_ceilings(con, run_date, dict(zip(
+        raw['ticker'], raw['price_52_week_high'].astype(float).round(4))))
 
+    closes = fetch_prices(build_cohort(history) + BENCHMARK_TICKERS)
+    prices = merge_prices(db.load_prices(con), closes, run_date)
+    db.save_prices(con, prices)
+    perf = compute_performance(history, prices)
+
+    # --- export the JSON the dashboard reads (never the .db directly) ---
     payload = build_payload(today, build_trend(history), run_date,
                             now.strftime('%Y-%m-%d %H:%M UTC'))
     write_latest(payload)
     write_archive(payload)
     TRAILS_PATH.write_text(json.dumps(build_trails(history, today),
                                       separators=(',', ':')))
-    write_ceilings(run_date, dict(zip(
-        raw['ticker'], raw['price_52_week_high'].astype(float).round(4))))
-
-    closes = fetch_prices(build_cohort(history) + BENCHMARK_TICKERS)
-    prices = merge_prices(load_prices(), closes, run_date)
-    prices.to_csv(PRICES_PATH, index=False)
-    perf = compute_performance(history, prices)
     PERFORMANCE_PATH.write_text(json.dumps(perf, separators=(',', ':')))
+    con.close()
+
     measured = sum(s['n'] for g in perf['groups'] if g['name'] == 'Breakouts'
                    for s in g['stats'].values())
     print(f'Cohort prices logged: {len(closes)} | measured windows: {measured}')
@@ -598,7 +565,7 @@ def main() -> int:
     n_b = int((today['list'] == 'Breakout').sum())
     stale = int((today['session_date'] != run_date).sum())
     print(f'Breakouts: {n_b} | Near: {len(today) - n_b} | stale sessions: {stale}')
-    print(f'Wrote {HISTORY_PATH.relative_to(ROOT)} and {DATA_JSON_PATH.relative_to(ROOT)}')
+    print(f'Wrote {DB_PATH.relative_to(ROOT)} and {DATA_JSON_PATH.relative_to(ROOT)}')
     return 0
 
 

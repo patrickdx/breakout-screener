@@ -85,17 +85,36 @@ def test_classify_off_screen_rows_dropped():
     assert df.empty                                    # 10% off high, no cross
 
 
-def test_ceilings_two_generation_rotation(tmp_path, monkeypatch):
-    import screener
-    monkeypatch.setattr(screener, 'CEILINGS_PATH', tmp_path / 'ceilings.json')
-    screener.write_ceilings('2026-06-30', {'A': 100.0})
-    screener.write_ceilings('2026-07-01', {'A': 110.0})
-    assert screener.load_prior_ceilings('2026-07-02') == {'A': 110.0}
+def test_ceilings_two_generation_rotation(tmp_path):
+    import db
+    con = db.connect(tmp_path / 'test.db')
+    assert db.load_prior_ceilings(con, '2026-06-30') == {}   # first ever run
+    db.write_ceilings(con, '2026-06-30', {'A': 100.0})
+    db.write_ceilings(con, '2026-07-01', {'A': 110.0})
+    assert db.load_prior_ceilings(con, '2026-07-02') == {'A': 110.0}
     # same-day re-run must see the generation BEFORE today's earlier write
-    assert screener.load_prior_ceilings('2026-07-01') == {'A': 100.0}
-    screener.write_ceilings('2026-07-01', {'A': 111.0})   # re-run overwrite
-    assert screener.load_prior_ceilings('2026-07-01') == {'A': 100.0}
-    assert screener.load_prior_ceilings('2026-07-02') == {'A': 111.0}
+    assert db.load_prior_ceilings(con, '2026-07-01') == {'A': 100.0}
+    db.write_ceilings(con, '2026-07-01', {'A': 111.0})   # re-run overwrite
+    assert db.load_prior_ceilings(con, '2026-07-01') == {'A': 100.0}
+    assert db.load_prior_ceilings(con, '2026-07-02') == {'A': 111.0}
+
+
+def test_db_history_and_prices_round_trip(tmp_path):
+    import db
+    con = db.connect(tmp_path / 'test.db')
+    assert db.load_history(con).empty and db.load_prices(con).empty
+    h = hist([('2026-06-30', '2026-06-30', 'Breakout', 'A'),
+              (RUN, RUN, 'Near', 'B')])
+    db.save_history(con, h)
+    out = db.load_history(con)
+    assert list(out.columns) == HISTORY_COLUMNS and len(out) == 2
+    assert out.iloc[0]['ticker'] == 'A' and out.iloc[0]['price'] == 1.0
+    assert pd.isna(out.iloc[0]['rs'])                 # NaN survives as NULL
+    db.save_history(con, h.iloc[:1])                  # full replace, not append
+    assert len(db.load_history(con)) == 1
+    db.save_prices(con, pd.DataFrame({'run_date': [RUN], 'ticker': ['Q'],
+                                      'close': [100.0]}))
+    assert db.load_prices(con).iloc[0]['close'] == 100.0
 
 
 def test_classify_session_date_from_bar_time():
