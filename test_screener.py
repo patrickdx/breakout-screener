@@ -13,7 +13,7 @@ def scanner_frame(rows: list[dict]) -> pd.DataFrame:
     defaults = {
         'ticker': 'NASDAQ:TEST', 'name': 'TEST', 'description': 'Test Corp',
         'close': 99.5, 'currency': 'USD', 'change': 1.0,
-        'price_52_week_high': 100.0, 'relative_volume_10d_calc': 2.0,
+        'High.3M': 100.0, 'relative_volume_10d_calc': 2.0,
         'market_cap_basic': 5e9, 'sector': 'Finance', 'industry': 'Banks',
         'country': 'United States', 'exchange': 'NASDAQ', 'logoid': 'test',
         'time': pd.Timestamp(f'{RUN} 13:30', tz='UTC').timestamp(),
@@ -60,7 +60,7 @@ def test_classify_classic_rule_crosser_kept_even_far_from_new_high():
     # Spiked to 110 (new high) but closed 99.6 — >5% off the NEW high, yet the
     # close crossed the PRIOR ceiling of 95, so it's a breakout and stays on screen.
     df = classify(scanner_frame([{'ticker': 'A', 'close': 99.6,
-                                  'price_52_week_high': 110.0}]),
+                                  'High.3M': 110.0}]),
                   RUN, {'A': 95.0})
     assert df.iloc[0]['list'] == 'Breakout' and df.iloc[0]['dist_pct'] > 5
 

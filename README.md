@@ -1,8 +1,10 @@
 # Breakout Screener
 
-Daily screener for global stocks trading near their 52-week high.
-Universe: every primary-listed common stock with **market cap > $2B** across
-**~45 markets** (US, Europe, Japan, China, India, …).
+Daily screener for global stocks breaking out to new **3-month highs**. A
+shorter lookback than the usual 52-week high surfaces emerging momentum weeks
+earlier — a stock reclaims a recent base long before it reclaims a yearly
+peak. Universe: every primary-listed common stock with **market cap > $1B**
+across **~45 markets** (US, Europe, Japan, China, India, …).
 
 **Dashboard:** https://patrickdx.github.io/breakout-screener/
 
@@ -13,20 +15,20 @@ earlier, so it's one clean global end-of-day snapshot) a GitHub Actions job
 runs [`screener.py`](screener.py):
 
 1. **One request** to TradingView's public scanner returns the whole filtered
-   universe — price, 52-week high, relative volume, sector, industry, market
+   universe — price, 3-month high, relative volume, sector, industry, market
    cap (USD), country, currency, logo. No API key, no per-ticker downloads.
 2. Each stock is classified:
-   - **Breakout** — the close crossed **above the prior session's 52-week
+   - **Breakout** — the close crossed **above the prior session's 3-month
      high** on volume > **1.2×** its 10-day average (the classic event
      definition: a conviction close through the old ceiling — intraday wicks
      don't count). Prior ceilings live in the `ceilings` table, written by
      the previous run for every stock within 25% of its high; a ticker with
      no stored ceiling falls back to the old state rule (within 0.5% of the
      current high on volume).
-   - **Near Breakout** — within **5%** of the current high (the watchlist).
+   - **Near** — within **5%** of the current 3-month high (the watchlist).
 
    The old state-rule signal stays derivable from history
-   (`dist_pct <= 0.5 and rel_volume > 1.2`), so the two definitions can be
+   (`dist_pct <= 0.5 and rel_volume > 1.2`), so the definitions can be
    compared on forward returns later.
 3. Streaks are computed from the stored history (see below), everything is
    written to the database, and the run then exports the JSON the dashboard
@@ -64,7 +66,7 @@ The dashboard's Streak column shows one number on both tabs: consecutive
 sessions the stock has appeared on screen — as a breakout or near the high
 (`days_near`, anchored by `near_start`; NEW on its first day). Both tabs sort
 longest streak first by default — a long streak is a base forming under the
-52-week high. The breakout-only streak (`streak`, since `streak_start`) still
+3-month high. The breakout-only streak (`streak`, since `streak_start`) still
 drives NEW-breakout notifications and shows in the detail panel. On the very
 first run every streak is 1; it accrues from there. History is pruned beyond
 `HISTORY_MAX_RUNS` (500) run dates.
@@ -139,8 +141,10 @@ Tests (pure logic, no network): `pip install pytest && pytest -q`.
 
 ## Tuning
 
-Constants at the top of [`screener.py`](screener.py): `BREAKOUT_PCT`,
-`PROXIMITY_PCT`, `VOLUME_THRESHOLD`, `MIN_MARKET_CAP`, `MARKETS`.
+Constants at the top of [`screener.py`](screener.py): `HIGH_FIELD` (the
+reference high — `High.3M`; swap for `price_52_week_high` to go back to a
+yearly lookback), `BREAKOUT_PCT`, `PROXIMITY_PCT`, `VOLUME_THRESHOLD`,
+`MIN_MARKET_CAP`, `MARKETS`.
 
 Adding a dashboard column: add the field to `FIELDS` in `screener.py`, carry
 it through `classify()` (it flows into the exported JSON automatically), and

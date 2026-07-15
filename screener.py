@@ -1,20 +1,23 @@
-"""Global 52-week-high breakout screener.
+"""Global 3-month-high breakout screener.
 
 One TradingView scanner query pulls every primary-listed common stock above
-MIN_MARKET_CAP across ~45 markets trading within UNIVERSE_PCT of its 52-week
+MIN_MARKET_CAP across ~45 markets trading within UNIVERSE_PCT of its 3-month
 high, pre-enriched with sector, industry, market cap (USD), country, currency
 and logo. No per-ticker downloads, no API key.
 
+The reference high is the trailing 3-MONTH high (TradingView's High.3M), not
+the 52-week high: a shorter window surfaces emerging momentum weeks earlier,
+because a stock reclaims a recent base long before it reclaims a yearly peak.
+
 Classification:
-  Breakout       close crossed ABOVE the prior session's 52-week high (the
+  Breakout       close crossed ABOVE the prior session's 3-month high (the
                  classic event definition: a conviction close through the old
                  ceiling, so intraday wicks don't count) with relative volume
-                 > VOLUME_THRESHOLD. The prior ceiling comes from
-                 data/ceilings.json, written by the previous run; tickers
-                 without a stored ceiling (first run, or a >UNIVERSE_PCT gap)
-                 fall back to the state rule: within BREAKOUT_PCT of the
-                 current high on volume.
-  Near Breakout  within PROXIMITY_PCT of the current high (watchlist state).
+                 > VOLUME_THRESHOLD. The prior ceiling comes from the ceilings
+                 table, written by the previous run; tickers without a stored
+                 ceiling (first run, or a >UNIVERSE_PCT gap) fall back to the
+                 state rule: within BREAKOUT_PCT of the current high on volume.
+  Near Breakout  within PROXIMITY_PCT of the current 3-month high (watchlist).
 
 The old state-rule flag stays derivable from history (dist_pct <= 0.5 and
 rel_volume > 1.2), so the two definitions can be compared on forward returns.
@@ -51,11 +54,12 @@ from tradingview_screener import Query, col
 import db
 from db import HISTORY_COLUMNS
 
-BREAKOUT_PCT = 0.5        # fallback state rule: % below 52w high
-PROXIMITY_PCT = 5.0       # % below 52w high to stay on screen at all
+HIGH_FIELD = 'High.3M'    # reference high: trailing 3-month high (vs 52-week)
+BREAKOUT_PCT = 0.5        # fallback state rule: % below the 3-month high
+PROXIMITY_PCT = 5.0       # % below the 3-month high to stay on screen at all
 UNIVERSE_PCT = 25.0       # server-side net; also the ceiling-tracking band
 VOLUME_THRESHOLD = 1.2    # today's volume vs 10-day average
-MIN_MARKET_CAP = 2_000_000_000   # USD
+MIN_MARKET_CAP = 1_000_000_000   # USD
 HISTORY_MAX_RUNS = 500    # prune history beyond this many run dates
 ARCHIVE_MAX_RUNS = 120    # per-run JSON archives kept in docs/runs/
 TREND_RUNS = 90           # runs shown in the dashboard trend chart
@@ -95,7 +99,7 @@ PERF_FIELDS = {'Perf.W': 'perf_w', 'Perf.1M': 'perf_1m', 'Perf.3M': 'perf_3m',
 
 FIELDS = [
     'name', 'description', 'close', 'currency', 'change',
-    'price_52_week_high', 'relative_volume_10d_calc', 'market_cap_basic',
+    HIGH_FIELD, 'relative_volume_10d_calc', 'market_cap_basic',
     'sector', 'industry', 'country', 'exchange', 'logoid', 'time',
     'earnings_release_next_date',
     *PERF_FIELDS,
@@ -124,7 +128,7 @@ def fetch() -> pd.DataFrame:
             col('market_cap_basic') > MIN_MARKET_CAP,
             col('is_primary') == True,           # dedupe cross-listings
             col('typespecs').has('common'),      # common stock only
-            col('close').above_pct('price_52_week_high', 1 - UNIVERSE_PCT / 100),
+            col('close').above_pct(HIGH_FIELD, 1 - UNIVERSE_PCT / 100),
         )
         .order_by('market_cap_basic', ascending=False)
         .limit(20000)
@@ -137,14 +141,14 @@ def classify(df: pd.DataFrame, run_date: str,
              prior_ceilings: dict[str, float] | None = None) -> pd.DataFrame:
     """Normalize scanner rows, tag Breakout/Near, drop off-screen rows.
 
-    Breakout = close crossed above the prior session's 52-week high on
+    Breakout = close crossed above the prior session's 3-month high on
     volume (falling back to the within-BREAKOUT_PCT state rule when no prior
     ceiling is stored). A crosser is kept even if a same-day spike leaves the
     close more than PROXIMITY_PCT below the *new* high. session_date is the
     UTC date of the row's latest exchange session; when it differs from
     run_date the data is stale (e.g. a US holiday).
     """
-    high = df['price_52_week_high']
+    high = df[HIGH_FIELD]
     session = pd.to_datetime(df['time'], unit='s', utc=True).dt.strftime('%Y-%m-%d')
     out = pd.DataFrame({
         'ticker': df['ticker'],
@@ -153,7 +157,7 @@ def classify(df: pd.DataFrame, run_date: str,
         'price': df['close'].astype(float).round(4),
         'currency': df['currency'].fillna('USD'),
         'change': df['change'].astype(float).round(2),
-        'high_52w': high.astype(float).round(4),
+        'high_3m': high.astype(float).round(4),
         'dist_pct': ((high - df['close']) / high * 100).astype(float).round(2),
         'rel_volume': df['relative_volume_10d_calc'].astype(float).round(2),
         'mcap': df['market_cap_basic'].astype(float),
@@ -526,7 +530,7 @@ def main() -> int:
     if raw.empty:
         print('Scanner returned no rows.', file=sys.stderr)
         return 1
-    print(f'Universe (>${MIN_MARKET_CAP / 1e9:.0f}B, within {UNIVERSE_PCT}% of 52w high): {len(raw)}')
+    print(f'Universe (>${MIN_MARKET_CAP / 1e9:.0f}B, within {UNIVERSE_PCT}% of 3-month high): {len(raw)}')
 
     con = db.connect(DB_PATH)
     prior = db.load_prior_ceilings(con, run_date)
@@ -539,7 +543,7 @@ def main() -> int:
     history = update_history(history, today, run_date)
     db.save_history(con, history)
     db.write_ceilings(con, run_date, dict(zip(
-        raw['ticker'], raw['price_52_week_high'].astype(float).round(4))))
+        raw['ticker'], raw[HIGH_FIELD].astype(float).round(4))))
 
     closes = fetch_prices(build_cohort(history) + BENCHMARK_TICKERS)
     prices = merge_prices(db.load_prices(con), closes, run_date)
