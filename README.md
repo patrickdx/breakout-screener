@@ -70,20 +70,20 @@ table:
   stale data (US holiday, same-day re-run) can never inflate a streak.
 - Re-running the job on the same day replaces that day's rows (idempotent).
 
-The dashboard's Streak column shows one number on both tabs: consecutive
-sessions the stock has appeared on screen — as a breakout or near the high
-(`days_near`, anchored by `near_start`; NEW on its first day). The breakout-only
-streak (`streak`, since `streak_start`) still drives NEW-breakout notifications
-and shows in the detail panel. On the very first run every streak is 1; it
-accrues from there. History is pruned beyond `HISTORY_MAX_RUNS` (500) run dates.
-
-**3M Hits** (`hits_3m`) answers a different question: how many sessions did
-the stock close as a Breakout within the trailing `ROLLING_RUNS` (63) runs —
+The dashboard's headline number is **3M Hits** (`hits_3m`): how many sessions
+the stock closed as a Breakout within the trailing `ROLLING_RUNS` (63) runs —
 roughly 3 months — *regardless of consecutiveness*. A streak resets the first
 day a stock drops off the list; the rolling count doesn't, so a stock blowing
 out its high repeatedly in bursts ranks high even between bursts. Both tabs
-sort by it first (then streak) by default. Like streaks it counts distinct
-exchange sessions, so stale re-served data never inflates it.
+sort by it first, and the column's subtext shows the consecutive on-screen
+run (`days_near`, since `near_start`; NEW on a first day).
+
+Classic streaks still exist underneath: the breakout-only streak (`streak`,
+since `streak_start`) drives NEW-breakout notifications and shows in the
+detail panel alongside the on-screen streak. All of these count distinct
+exchange sessions, so stale re-served data never inflates them. On the very
+first run every count is 1; it accrues from there. History is pruned beyond
+`HISTORY_MAX_RUNS` (500) run dates.
 
 ## Notifications
 

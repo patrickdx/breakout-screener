@@ -170,14 +170,18 @@
     border-radius: 12px; padding: 14px 16px; }
   .trailbox svg { display: block; width: 100%; height: 120px; }
   #lwchart { width: 100%; height: 230px; }
-  .btable { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12.5px; }
-  .btable th { color: var(--muted); font-size: 10.5px; text-transform: uppercase;
+  /* min-width/sticky/cursor: undo the main-table globals that leak in here */
+  .btable { width: 100%; min-width: 0; border-collapse: collapse; font-size: 12.5px; }
+  .btable th { position: static; cursor: default; background: transparent;
+    color: var(--muted); font-size: 10.5px; text-transform: uppercase;
     letter-spacing: .04em; font-weight: 600; text-align: right; padding: 4px 10px;
     border-bottom: 1px solid var(--card-border); }
-  .btable td { padding: 5px 10px; text-align: right; border-bottom: 1px solid rgba(30,36,49,.5);
+  .btable th:hover { color: var(--muted); }
+  .btable td { padding: 6px 10px; text-align: right; border-bottom: 1px solid rgba(30,36,49,.5);
     font-variant-numeric: tabular-nums; }
   .btable th:first-child, .btable td:first-child { text-align: left; padding-left: 2px; }
   .btable tr:last-child td { border-bottom: 0; }
+  .btable tr:hover { background: transparent; }
   .trailbox .cap { color: var(--muted); font-size: 12px; margin-top: 8px; }
   .frame { border: 1px solid var(--card-border); border-radius: 12px; overflow: hidden;
     background: var(--card); }
@@ -234,8 +238,8 @@
 
   <footer>
     Breakout = close above the prior session's 3-month high on volume &gt; <span id="f-vt"></span>× its 10-day average ·
-    Near = within <span id="f-pp"></span>% of the high · Streaks count distinct exchange sessions on the list ·
-    3M Hits counts breakout days over the last 63 runs, bursts included.<br>
+    Near = within <span id="f-pp"></span>% of the high · 3M Hits counts breakout sessions over the
+    last 63 runs — bursts included, stale re-served sessions never double-counted.<br>
     Prices in local currency; market cap in USD. Data via TradingView's public scanner, updated each weekday after US close.
     Not investment advice. <a href="https://github.com/patrickdx/breakout-screener">Source on GitHub</a>.
   </footer>
@@ -265,7 +269,8 @@ const logoUrl = id => 'https://s3-symbol-logo.tradingview.com/' + id + '.svg';
 /* ---------- columns: add a future column by adding one entry ---------- */
 /* render(row, ctx) -> cell HTML; sort -> value used when the header is clicked */
 const COLUMNS = [
-  { label: 'Symbol', left: true, sort: r => r.symbol, render: (r) => {
+  { label: 'Symbol', left: true, sort: r => r.symbol,
+    title: 'Click the row for details · ⚠️ = earnings within 7 days', render: (r) => {
       const logo = r.logoid
         ? `<img class="logo" loading="lazy" src="${logoUrl(r.logoid)}" alt=""
              onerror="this.replaceWith(Object.assign(document.createElement('span'),
@@ -277,12 +282,14 @@ const COLUMNS = [
         <a href="${tvUrl(r.ticker)}" target="_blank" rel="noopener">${esc(r.symbol)}</a>${earn}
         <div class="nm" title="${esc(r.name)}">${esc(r.name)}</div></div></div>`;
     } },
-  { label: 'Price', sort: r => r.price, render: (r, ctx) => {
+  { label: 'Price', sort: r => r.price,
+    title: "Last close in the listing's local currency · ● = its exchange was closed on the run date",
+    render: (r, ctx) => {
       const stale = r.session_date !== ctx.run_date
         ? ` <span class="stale" title="Last session: ${r.session_date} (market closed on run date)">●</span>` : '';
       return fmtPrice(r.price, r.currency) + `<span class="ccy">${esc(r.currency)}</span>` + stale;
     } },
-  { label: 'Day', desc: true, sort: r => r.change, render: r =>
+  { label: 'Day', desc: true, sort: r => r.change, title: "Day's price change", render: r =>
       r.change == null ? '–' : `<span class="${r.change >= 0 ? 'up' : 'down'}">${fmtPct(r.change)}</span>` },
   { label: 'To High', desc: true, title: "How far today's close sits below the 3-month high",
     sort: r => -r.dist_pct, render: (r, ctx) => {
@@ -298,22 +305,23 @@ const COLUMNS = [
       r.rs == null ? '–'
         : `<span class="${r.rs >= 0 ? 'up' : 'down'}"
              title="3-month performance vs the median of its country's near-high peers">${fmtPct(r.rs)}</span>` },
-  { label: '3M Hits', desc: true, sort: r => r.hits_3m ?? -1,
-    title: 'Sessions closed as a breakout in the last ~3 months (63 runs) — bursts count, no reset on a day off the list',
-    render: r => r.hits_3m == null ? '–'
-      : r.hits_3m === 0 ? '<span class="dim">0</span>'
-      : `<span class="pill streak">⚡ ${r.hits_3m}</span>` },
-  { label: 'Streak', desc: true, sort: r => r.days_near,
-    title: 'Days in a row this stock has been on screen — as a breakout or near the 3-month high',
+  { label: '3M Hits', desc: true, sort: r => (r.hits_3m ?? 0) * 1000 + (r.days_near ?? 0),
+    title: 'Sessions closed as a breakout in the last ~3 months (63 runs) — bursts count, a day off the list does not reset it. Subtext: consecutive days on screen.',
     render: r => {
-      if (r.days_near === 1) return '<span class="pill new">NEW</span><div class="since">first day</div>';
-      const since = r.near_start ? `<div class="since">since ${fmtDate(r.near_start)}</div>` : '';
-      return `<span class="pill streak">🔥 ${r.days_near} days</span>${since}`;
+      const pill = r.hits_3m > 0 ? `<span class="pill streak">⚡ ${r.hits_3m}</span>`
+        : r.days_near === 1 ? '<span class="pill new">NEW</span>' : '<span class="dim">0</span>';
+      const since = r.days_near === 1 ? '<div class="since">first day on screen</div>'
+        : r.days_near > 1 ? `<div class="since">on screen ${r.days_near}d${
+            r.near_start ? ' · since ' + fmtDate(r.near_start) : ''}</div>` : '';
+      return pill + since;
     } },
-  { label: 'Mkt Cap', desc: true, sort: r => r.mcap, render: r => fmtCap(r.mcap) },
-  { label: 'Sector', left: true, sort: r => r.sector, render: r =>
+  { label: 'Mkt Cap', desc: true, sort: r => r.mcap, title: 'Market cap, normalized to USD',
+    render: r => fmtCap(r.mcap) },
+  { label: 'Sector', left: true, sort: r => r.sector,
+    title: "Sector — hover a row's value for its industry", render: r =>
       `<span title="${esc(r.industry)}">${esc(r.sector) || '–'}</span>` },
-  { label: 'Country', left: true, sort: r => r.country, render: r => esc(r.country) || '–' },
+  { label: 'Country', left: true, sort: r => r.country, title: 'Country of the primary listing',
+    render: r => esc(r.country) || '–' },
   { label: '', render: r =>
       `<a class="ext" href="${tvUrl(r.ticker)}" target="_blank" rel="noopener"
          title="Open in TradingView">↗</a>` },
@@ -535,8 +543,13 @@ function breakoutTable(trail, currency) {
     <td>${e.dist == null ? '–' : e.dist <= 0 ? 'at high' : '−' + e.dist.toFixed(2) + '%'}</td>
   </tr>`).join('');
   return `<table class="btable">
-    <thead><tr><th>Breakout day</th><th>Close</th><th>Vs prior run</th>
-      <th>Rel vol</th><th>To high</th></tr></thead>
+    <thead><tr>
+      <th title="Run date the screener flagged this stock as a breakout">Breakout day</th>
+      <th title="Close on the breakout day (local currency)">Close</th>
+      <th title="Close vs the previous stored run">Vs prior run</th>
+      <th title="Volume vs the stock's 10-day average">Rel vol</th>
+      <th title="How far the close sat below the 3-month high">To high</th>
+    </tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 
@@ -609,10 +622,15 @@ function mountTrail() {
   const row = PANEL_T && findRow(PANEL_T);
   if (!box || !row) return;
   destroyChart();
-  if (!TRAILS) { box.innerHTML = '<div class="cap">Loading history…</div>'; return; }
+  const note = msg => {
+    box.innerHTML = `<div class="cap">${msg}</div>`;
+    const tb = $('btablebox');
+    if (tb) tb.innerHTML = `<div class="cap">${msg}</div>`;
+  };
+  if (!TRAILS) { note('Loading history…'); return; }
   const trail = TRAILS[PANEL_T];
   if (!trail || !trail.length) {
-    box.innerHTML = '<div class="cap">No stored appearances for this ticker yet — history accrues one run per trading day.</div>';
+    note('No stored appearances for this ticker yet — history accrues one run per trading day.');
     return;
   }
   const hasPx = trail.some(e => e[4] != null);
@@ -623,15 +641,17 @@ function mountTrail() {
   }
   const legend = '<span style="color:var(--amber)">●</span> = run flagged as a breakout'
     + ' · close per run, off-screen days filled from the price log';
-  const table = breakoutTable(trail, row.currency);
   if (LWC_STATE === 'ready') {
-    box.innerHTML = '<div id="lwchart"></div>' + trailCaption(trail, row, legend) + table;
+    box.innerHTML = '<div id="lwchart"></div>' + trailCaption(trail, row, legend);
     LW_CHART = renderLWChart($('lwchart'), trail, row.currency);
   } else {        // SVG placeholder now; upgrades in place when the lib lands
     box.innerHTML = priceChart(trail, row.currency) + trailCaption(trail, row,
-      legend + ' · small dot = near the high') + table;
+      legend + ' · small dot = near the high');
     loadLWC();
   }
+  const tbox = $('btablebox');
+  if (tbox) tbox.innerHTML = breakoutTable(trail, row.currency)
+    || '<div class="cap">No flagged breakouts in the stored window yet.</div>';
 }
 
 function findRow(t) {
@@ -713,6 +733,8 @@ function openDetail(t) {
     <div class="sect">Price chart</div>
     <div class="frame"><iframe style="height:460px" loading="lazy"
       src="https://s.tradingview.com/widgetembed/?symbol=${sym}&interval=D&theme=dark&style=1&locale=en&hidesidetoolbar=1&symboledit=0&withdateranges=1&hideideas=1&toolbarbg=131722"></iframe></div>
+    <div class="sect" title="Every session the screener flagged this stock as a breakout — find these dates on the candles above">Breakout days</div>
+    <div class="trailbox" id="btablebox"></div>
     <div class="sect">Company & technicals</div>
     <div class="duo">
       <div class="frame">${widgetFrame('symbol-profile', t, 340)}</div>
