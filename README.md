@@ -4,7 +4,7 @@ Daily screener for global stocks breaking out to new **3-month highs**. A
 shorter lookback than the usual 52-week high surfaces emerging momentum weeks
 earlier — a stock reclaims a recent base long before it reclaims a yearly
 peak. Universe: every primary-listed common stock with **market cap > $1B**
-across **~45 markets** (US, Europe, Japan, China, India, …).
+across **46 markets** (US, Europe, Japan, China, India, …).
 
 **Dashboard:** https://patrickdx.github.io/breakout-screener/
 
@@ -46,10 +46,18 @@ touches the `.db`. Instead each run exports small JSON views of the data
 into `docs/`, and the static page fetches those. The date picker cycles
 through the archived runs (one per trading day, kept for the last
 `ARCHIVE_MAX_RUNS` = 120 runs). Clicking a row opens a detail panel: streak
-stats, price performance (1W–1Y), an appearance-trail chart fed by
-`docs/trails.json`, and TradingView's embedded price chart, company profile
-and technicals gauge. Panels are deep-linkable (`?t=NASDAQ:AAPL`); the ↗
-column jumps straight to TradingView.
+stats, price performance (1W–1Y), a price chart built from `docs/trails.json`
+(close at every stored run with each ⚡ flagged breakout marked — TradingView's
+embed can't take custom markers, so this chart comes from the screener's own
+run log, including price-log closes for runs the stock was off screen). It
+renders with [Lightweight Charts](https://github.com/tradingview/lightweight-charts)
+(TradingView's open-source canvas library, lazy-loaded from a pinned CDN
+build) and falls back to a dependency-free inline SVG if the CDN is blocked.
+Below it: TradingView's embedded price chart, company profile and technicals
+gauge.
+Panels are deep-linkable (`?t=NASDAQ:AAPL`); the ↗ column jumps straight to
+TradingView. The country filter defaults to United States — pick "All
+countries" for the global view.
 
 ## Streaks
 
@@ -64,12 +72,18 @@ table:
 
 The dashboard's Streak column shows one number on both tabs: consecutive
 sessions the stock has appeared on screen — as a breakout or near the high
-(`days_near`, anchored by `near_start`; NEW on its first day). Both tabs sort
-longest streak first by default — a long streak is a base forming under the
-3-month high. The breakout-only streak (`streak`, since `streak_start`) still
-drives NEW-breakout notifications and shows in the detail panel. On the very
-first run every streak is 1; it accrues from there. History is pruned beyond
-`HISTORY_MAX_RUNS` (500) run dates.
+(`days_near`, anchored by `near_start`; NEW on its first day). The breakout-only
+streak (`streak`, since `streak_start`) still drives NEW-breakout notifications
+and shows in the detail panel. On the very first run every streak is 1; it
+accrues from there. History is pruned beyond `HISTORY_MAX_RUNS` (500) run dates.
+
+**3M Hits** (`hits_3m`) answers a different question: how many sessions did
+the stock close as a Breakout within the trailing `ROLLING_RUNS` (63) runs —
+roughly 3 months — *regardless of consecutiveness*. A streak resets the first
+day a stock drops off the list; the rolling count doesn't, so a stock blowing
+out its high repeatedly in bursts ranks high even between bursts. Both tabs
+sort by it first (then streak) by default. Like streaks it counts distinct
+exchange sessions, so stale re-served data never inflates it.
 
 ## Notifications
 

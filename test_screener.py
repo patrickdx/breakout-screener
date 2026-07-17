@@ -201,6 +201,42 @@ def test_near_start_is_today_for_first_appearance():
     assert today.iloc[0]['near_start'] == RUN and today.iloc[0]['days_near'] == 1
 
 
+def test_hits_3m_counts_bursts_across_gaps():
+    # The 06-26 breakout is walled off behind a Near day, so the consecutive
+    # streak only reaches back to 06-30 — but the rolling count sees all 3 hits.
+    h = hist([('2026-06-26', '2026-06-26', 'Breakout', 'A'),
+              ('2026-06-27', '2026-06-27', 'Near', 'A'),
+              ('2026-06-30', '2026-06-30', 'Breakout', 'A')])
+    today = compute_streaks(h, today_frame([('A', 'Breakout', RUN)]), RUN)
+    row = today.iloc[0]
+    assert row['streak'] == 2 and row['hits_3m'] == 3
+
+
+def test_hits_3m_counts_for_near_rows_without_reset():
+    h = hist([('2026-06-27', '2026-06-27', 'Breakout', 'A'),
+              ('2026-06-30', '2026-06-30', 'Breakout', 'A')])
+    today = compute_streaks(h, today_frame([('A', 'Near', RUN)]), RUN)
+    assert today.iloc[0]['hits_3m'] == 2 and today.iloc[0]['streak'] == 0
+
+
+def test_hits_3m_window_excludes_old_runs(monkeypatch):
+    import screener
+    monkeypatch.setattr(screener, 'ROLLING_RUNS', 3)   # today + 2 prior runs
+    h = hist([('2026-06-26', '2026-06-26', 'Breakout', 'A'),   # outside window
+              ('2026-06-27', '2026-06-27', 'Breakout', 'A'),
+              ('2026-06-30', '2026-06-30', 'Breakout', 'A')])
+    today = compute_streaks(h, today_frame([('A', 'Breakout', RUN)]), RUN)
+    assert today.iloc[0]['hits_3m'] == 3               # 06-27, 06-30, today
+
+
+def test_hits_3m_distinct_sessions_not_inflated_by_stale_reruns():
+    # Two runs re-serving the same session = one hit, same as streaks.
+    h = hist([('2026-06-27', '2026-06-27', 'Breakout', 'A'),
+              ('2026-06-30', '2026-06-27', 'Breakout', 'A')])
+    today = compute_streaks(h, today_frame([('A', 'Breakout', RUN)]), RUN)
+    assert today.iloc[0]['hits_3m'] == 2
+
+
 def test_near_start_resets_after_off_screen_gap():
     # A on screen 06-27, absent from the 06-30 run -> streak restarts today.
     h = hist([('2026-06-27', '2026-06-27', 'Near', 'A'),
@@ -235,7 +271,8 @@ D = ['2026-07-01', '2026-07-02', '2026-07-03', '2026-07-06', '2026-07-07']
 
 def price_frame(rows: list[tuple]) -> pd.DataFrame:
     return pd.DataFrame([{'run_date': d, 'ticker': t, 'close': c}
-                         for d, t, c in rows])
+                         for d, t, c in rows],
+                        columns=['run_date', 'ticker', 'close'])
 
 
 def sig_hist(rows: list[tuple]) -> pd.DataFrame:
@@ -374,9 +411,23 @@ def test_build_trails_covers_screen_tickers_only_oldest_first():
     h = hist([('2026-06-30', '2026-06-30', 'Near', 'A'),
               (RUN, RUN, 'Breakout', 'A'),
               (RUN, RUN, 'Near', 'GONE')])   # not on today's screen
-    trails = build_trails(h, today_frame([('A', 'Breakout', RUN)]))
+    trails = build_trails(h, today_frame([('A', 'Breakout', RUN)]),
+                          price_frame([]))
     assert set(trails) == {'A'}
     assert [(e[0], e[1]) for e in trails['A']] == [('2026-06-30', 'N'), (RUN, 'B')]
     assert trails['A'][0][2] == 0.1 and trails['A'][0][3] == 2.0
+    assert trails['A'][0][4] == 1.0                    # close carried into trail
+
+
+def test_build_trails_fills_off_screen_gaps_from_price_log():
+    from screener import build_trails
+    # A broke out 06-27, fell off screen 06-30 (price log only), back today.
+    h = hist([('2026-06-27', '2026-06-27', 'Breakout', 'A'),
+              (RUN, RUN, 'Breakout', 'A')])
+    p = price_frame([('2026-06-27', 'A', 1.0), ('2026-06-30', 'A', 0.9),
+                     ('2026-06-30', 'OTHER', 5.0)])
+    trails = build_trails(h, today_frame([('A', 'Breakout', RUN)]), p)
+    assert [(e[0], e[1], e[4]) for e in trails['A']] == [
+        ('2026-06-27', 'B', 1.0), ('2026-06-30', '', 0.9), (RUN, 'B', 1.0)]
 
 

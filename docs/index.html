@@ -112,6 +112,7 @@
   .pill.new { background: rgba(96,165,250,.15); color: var(--blue); }
   .pill.streak { background: rgba(251,191,36,.13); color: var(--amber); }
   .since { font-size: 10.5px; color: var(--faint); margin-top: 2px; }
+  .dim { color: var(--faint); }
 
   .more { display: block; margin: 0 auto; padding: 10px 22px; margin-top: 16px;
     background: var(--card); border: 1px solid var(--card-border); color: var(--text);
@@ -168,6 +169,15 @@
   .trailbox { background: var(--card); border: 1px solid var(--card-border);
     border-radius: 12px; padding: 14px 16px; }
   .trailbox svg { display: block; width: 100%; height: 120px; }
+  #lwchart { width: 100%; height: 230px; }
+  .btable { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12.5px; }
+  .btable th { color: var(--muted); font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: .04em; font-weight: 600; text-align: right; padding: 4px 10px;
+    border-bottom: 1px solid var(--card-border); }
+  .btable td { padding: 5px 10px; text-align: right; border-bottom: 1px solid rgba(30,36,49,.5);
+    font-variant-numeric: tabular-nums; }
+  .btable th:first-child, .btable td:first-child { text-align: left; padding-left: 2px; }
+  .btable tr:last-child td { border-bottom: 0; }
   .trailbox .cap { color: var(--muted); font-size: 12px; margin-top: 8px; }
   .frame { border: 1px solid var(--card-border); border-radius: 12px; overflow: hidden;
     background: var(--card); }
@@ -224,7 +234,8 @@
 
   <footer>
     Breakout = close above the prior session's 3-month high on volume &gt; <span id="f-vt"></span>× its 10-day average ·
-    Near = within <span id="f-pp"></span>% of the high · Streaks count distinct exchange sessions on the list.<br>
+    Near = within <span id="f-pp"></span>% of the high · Streaks count distinct exchange sessions on the list ·
+    3M Hits counts breakout days over the last 63 runs, bursts included.<br>
     Prices in local currency; market cap in USD. Data via TradingView's public scanner, updated each weekday after US close.
     Not investment advice. <a href="https://github.com/patrickdx/breakout-screener">Source on GitHub</a>.
   </footer>
@@ -287,6 +298,11 @@ const COLUMNS = [
       r.rs == null ? '–'
         : `<span class="${r.rs >= 0 ? 'up' : 'down'}"
              title="3-month performance vs the median of its country's near-high peers">${fmtPct(r.rs)}</span>` },
+  { label: '3M Hits', desc: true, sort: r => r.hits_3m ?? -1,
+    title: 'Sessions closed as a breakout in the last ~3 months (63 runs) — bursts count, no reset on a day off the list',
+    render: r => r.hits_3m == null ? '–'
+      : r.hits_3m === 0 ? '<span class="dim">0</span>'
+      : `<span class="pill streak">⚡ ${r.hits_3m}</span>` },
   { label: 'Streak', desc: true, sort: r => r.days_near,
     title: 'Days in a row this stock has been on screen — as a breakout or near the 3-month high',
     render: r => {
@@ -444,7 +460,45 @@ const widgetFrame = (name, symbol, height, extra = {}) => {
     src="https://www.tradingview-widget.com/embed-widget/${name}/?locale=en&symbol=${encodeURIComponent(symbol)}#${cfg}"></iframe>`;
 };
 
-function trailChart(trail) {
+/* Close per run with the screener's own breakout flags marked. Falls back to
+   the proximity-dot view while trails.json predates the price field. */
+function priceChart(trail, currency) {
+  const w = 640, h = 170, padL = 18, padR = 52, padT = 16, padB = 20;
+  const pts = trail.map((e, i) => [i, e]).filter(([, e]) => e[4] != null);
+  const px = pts.map(([, e]) => e[4]);
+  const lo = Math.min(...px), hi = Math.max(...px);
+  const span = (hi - lo) || Math.abs(hi) * 0.02 || 1;
+  const x = i => trail.length === 1 ? w / 2 : padL + i / (trail.length - 1) * (w - padL - padR);
+  const y = v => padT + (1 - (v - lo) / span) * (h - padT - padB);
+  const line = pts.map(([i, e]) => `${x(i).toFixed(1)},${y(e[4]).toFixed(1)}`).join(' ');
+  const tipFor = ([, e]) => `${e[0]} · ${fmtPrice(e[4], currency)} · ${
+    e[1] === 'B' ? 'BREAKOUT' : e[1] === 'N' ? 'near the high' : 'off screen (price log)'}${
+    e[2] != null && e[1] ? ` · −${e[2]}% from high` : ''}${
+    e[3] != null && e[1] ? ` · ${e[3]}× vol` : ''}`;
+  const dots = pts.map(p => {
+    const [i, e] = p, cx = x(i).toFixed(1), cy = y(e[4]).toFixed(1);
+    if (e[1] === 'B') return `<g><circle cx="${cx}" cy="${cy}" r="5" fill="var(--amber)"
+        stroke="#0d1117" stroke-width="1.5"/>
+      <text x="${cx}" y="${(y(e[4]) - 9).toFixed(1)}" text-anchor="middle" font-size="10">⚡</text>
+      <title>${tipFor(p)}</title></g>`;
+    if (e[1] === 'N') return `<circle cx="${cx}" cy="${cy}" r="2.5" fill="#5b6274">
+      <title>${tipFor(p)}</title></circle>`;
+    return `<circle cx="${cx}" cy="${cy}" r="1.5" fill="#3b4560">
+      <title>${tipFor(p)}</title></circle>`;
+  }).join('');
+  const last = pts[pts.length - 1];
+  return `<svg viewBox="0 0 ${w} ${h}">
+    ${pts.length > 1 ? `<polyline points="${line}" fill="none" stroke="var(--blue)"
+      stroke-width="1.5" stroke-linejoin="round" stroke-opacity=".85"/>` : ''}
+    ${dots}
+    <text x="${w - padR + 6}" y="${(y(last[1][4]) + 3).toFixed(1)}" fill="var(--muted)"
+      font-size="10">${fmtPrice(last[1][4], currency)}</text>
+    <text x="${padL}" y="${h - 6}" fill="var(--faint)" font-size="9">${trail[0][0]}</text>
+    <text x="${w - padR}" y="${h - 6}" fill="var(--faint)" font-size="9"
+      text-anchor="end">${trail[trail.length - 1][0]}</text></svg>`;
+}
+
+function distChart(trail) {
   const w = 640, h = 120, pad = 16;
   const dists = trail.map(e => e[2]).filter(v => v != null);
   const maxD = Math.max(5, ...dists);
@@ -464,19 +518,120 @@ function trailChart(trail) {
     ${dots}</svg>`;
 }
 
-function trailSection(t, row) {
-  if (!TRAILS) return '<div class="cap">Loading history…</div>';
-  const trail = TRAILS[t];
-  if (!trail || !trail.length)
-    return '<div class="cap">No stored appearances for this ticker yet — history accrues one run per trading day.</div>';
+function breakoutTable(trail, currency) {
+  const events = [];
+  trail.forEach((e, i) => {
+    if (e[1] !== 'B') return;
+    const prev = [...trail.slice(0, i)].reverse().find(p => p[4] != null);
+    const chg = e[4] != null && prev ? (e[4] / prev[4] - 1) * 100 : null;
+    events.push({ d: e[0], px: e[4], chg, dist: e[2], rv: e[3] });
+  });
+  if (!events.length) return '';
+  const rows = events.reverse().map(e => `<tr>
+    <td>${e.d}</td>
+    <td>${e.px == null ? '–' : fmtPrice(e.px, currency)}</td>
+    <td>${e.chg == null ? '–' : `<span class="${e.chg >= 0 ? 'up' : 'down'}">${fmtPct(e.chg)}</span>`}</td>
+    <td>${e.rv == null ? '–' : e.rv.toFixed(2) + '×'}</td>
+    <td>${e.dist == null ? '–' : e.dist <= 0 ? 'at high' : '−' + e.dist.toFixed(2) + '%'}</td>
+  </tr>`).join('');
+  return `<table class="btable">
+    <thead><tr><th>Breakout day</th><th>Close</th><th>Vs prior run</th>
+      <th>Rel vol</th><th>To high</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+function trailCaption(trail, row, legend) {
   const nB = trail.filter(e => e[1] === 'B').length;
-  return trailChart(trail) + `<div class="cap">
-    Dot per run on screen (🟡 breakout · ⚪ near), higher = closer to the 3-month high ·
-    ${trail.length} appearance${trail.length > 1 ? 's' : ''} since ${trail[0][0]},
+  return `<div class="cap">
+    ${legend} ·
+    ${trail.length} run${trail.length > 1 ? 's' : ''} since ${trail[0][0]},
     ${nB} as breakout${row.streak > 1
       ? ` · current streak ${row.streak} sessions (since ${esc(row.streak_start)})`
       : !row.streak && row.days_near > 1 && row.near_start
         ? ` · near the high ${row.days_near} sessions (since ${esc(row.near_start)})` : ''}</div>`;
+}
+
+/* ---- Lightweight Charts (TradingView, Apache-2.0): lazy-loaded from a
+   pinned CDN build. While it loads — or if the CDN is blocked — the
+   hand-rolled SVG chart above serves as placeholder and fallback. ---- */
+let LWC_STATE = null;   // null | 'loading' | 'ready' | 'failed'
+let LW_CHART = null;    // live chart instance in the open panel
+
+function loadLWC() {
+  if (LWC_STATE) return;
+  LWC_STATE = 'loading';
+  const s = document.createElement('script');
+  s.src = 'https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js';
+  s.onload = () => { LWC_STATE = 'ready'; mountTrail(); };
+  s.onerror = () => { LWC_STATE = 'failed'; mountTrail(); };
+  document.head.appendChild(s);
+}
+
+function destroyChart() {
+  if (LW_CHART) { try { LW_CHART.remove(); } catch (e) {} LW_CHART = null; }
+}
+
+function renderLWChart(el, trail, currency) {
+  const pts = trail.filter(e => e[4] != null);
+  const precision = Math.max(...pts.map(e => e[4])) < 2 ? 4 : 2;
+  const chart = LightweightCharts.createChart(el, {
+    autoSize: true,
+    layout: { background: { type: 'solid', color: 'transparent' },
+              textColor: '#8b93a7', fontSize: 11 },
+    grid: { vertLines: { visible: false },
+            horzLines: { color: 'rgba(30,36,49,.55)' } },
+    rightPriceScale: { borderColor: '#1e2431',
+                       scaleMargins: { top: 0.12, bottom: 0.1 } },
+    timeScale: { borderColor: '#1e2431' },
+    crosshair: { vertLine: { labelBackgroundColor: '#2a3347' },
+                 horzLine: { labelBackgroundColor: '#2a3347' } },
+    handleScroll: false, handleScale: false,   // static view; don't eat page scroll
+  });
+  const opts = { lineColor: '#60a5fa', lineWidth: 2,
+                 topColor: 'rgba(96,165,250,.25)', bottomColor: 'rgba(96,165,250,0)',
+                 priceLineVisible: false,
+                 priceFormat: { type: 'price', precision, minMove: 1 / 10 ** precision } };
+  const series = LightweightCharts.AreaSeries
+    ? chart.addSeries(LightweightCharts.AreaSeries, opts)   // v5 API
+    : chart.addAreaSeries(opts);                            // v4 fallback
+  series.setData(pts.map(e => ({ time: e[0], value: e[4] })));
+  const markers = pts.filter(e => e[1] === 'B').map(e => ({
+    time: e[0], position: 'inBar', color: '#fbbf24', shape: 'circle', size: 1,
+  }));
+  if (LightweightCharts.createSeriesMarkers) LightweightCharts.createSeriesMarkers(series, markers);
+  else series.setMarkers(markers);
+  chart.timeScale().fitContent();
+  return chart;
+}
+
+function mountTrail() {
+  const box = $('trailbox');
+  const row = PANEL_T && findRow(PANEL_T);
+  if (!box || !row) return;
+  destroyChart();
+  if (!TRAILS) { box.innerHTML = '<div class="cap">Loading history…</div>'; return; }
+  const trail = TRAILS[PANEL_T];
+  if (!trail || !trail.length) {
+    box.innerHTML = '<div class="cap">No stored appearances for this ticker yet — history accrues one run per trading day.</div>';
+    return;
+  }
+  const hasPx = trail.some(e => e[4] != null);
+  if (!hasPx) {   // old trails.json without prices: proximity view
+    box.innerHTML = distChart(trail) + trailCaption(trail, row,
+      'Dot per run on screen (🟡 breakout · ⚪ near), higher = closer to the 3-month high');
+    return;
+  }
+  const legend = '<span style="color:var(--amber)">●</span> = run flagged as a breakout'
+    + ' · close per run, off-screen days filled from the price log';
+  const table = breakoutTable(trail, row.currency);
+  if (LWC_STATE === 'ready') {
+    box.innerHTML = '<div id="lwchart"></div>' + trailCaption(trail, row, legend) + table;
+    LW_CHART = renderLWChart($('lwchart'), trail, row.currency);
+  } else {        // SVG placeholder now; upgrades in place when the lib lands
+    box.innerHTML = priceChart(trail, row.currency) + trailCaption(trail, row,
+      legend + ' · small dot = near the high') + table;
+    loadLWC();
+  }
 }
 
 function findRow(t) {
@@ -544,6 +699,9 @@ function openDetail(t) {
       <div class="stat"><div class="k">RS 3M vs country</div>
         <div class="v ${r.rs >= 0 ? 'up' : 'down'}">${r.rs == null ? '–' : fmtPct(r.rs)}</div></div>
       <div class="stat"><div class="k">Breakout streak</div><div class="v">${streakStat}</div></div>
+      <div class="stat"><div class="k">3M hits</div>
+        <div class="v">${r.hits_3m == null ? '–'
+          : r.hits_3m + ` <small>breakout day${r.hits_3m === 1 ? '' : 's'} in 3M</small>`}</div></div>
       <div class="stat"><div class="k">On screen</div>
         <div class="v">${r.days_near} <small>session${r.days_near > 1 ? 's' : ''}${
           r.days_near === 1 ? ' · NEW' : r.near_start ? ' · since ' + esc(r.near_start) : ''}</small></div></div>
@@ -551,7 +709,7 @@ function openDetail(t) {
     </div>
     ${perfSection(r)}
     <div class="sect">Breakout history</div>
-    <div class="trailbox" id="trailbox">${trailSection(t, r)}</div>
+    <div class="trailbox" id="trailbox"></div>
     <div class="sect">Price chart</div>
     <div class="frame"><iframe style="height:460px" loading="lazy"
       src="https://s.tradingview.com/widgetembed/?symbol=${sym}&interval=D&theme=dark&style=1&locale=en&hidesidetoolbar=1&symboledit=0&withdateranges=1&hideideas=1&toolbarbg=131722"></iframe></div>
@@ -565,21 +723,19 @@ function openDetail(t) {
   document.body.style.overflow = 'hidden';
   $('p-close').addEventListener('click', closeDetail);
   history.replaceState(null, '', location.pathname + '?t=' + encodeURIComponent(t) + location.hash);
+  mountTrail();
 
   if (!TRAILS) {
     getJSON('trails.json')
       .then(d => { TRAILS = d; })
       .catch(() => { TRAILS = {}; })
-      .finally(() => {
-        const box = document.getElementById('trailbox');
-        const rr = PANEL_T && findRow(PANEL_T);
-        if (box && rr) box.innerHTML = trailSection(PANEL_T, rr);
-      });
+      .finally(mountTrail);
   }
 }
 
 function closeDetail() {
   PANEL_T = null;
+  destroyChart();
   $('overlay').hidden = true;
   $('panel').innerHTML = '';
   document.body.style.overflow = '';
@@ -598,7 +754,7 @@ let PENDING_T = new URLSearchParams(location.search).get('t');
 
 function applyData(d) {
   DATA = d;
-  state = { ...state, q: '', sector: '', country: '', sortCol: null, sortDir: 1, limit: PAGE };
+  state = { ...state, q: '', sector: '', country: 'United States', sortCol: null, sortDir: 1, limit: PAGE };
   $('q').value = '';
   $('updated').textContent = 'Updated ' + d.generated_utc;
   $('subtitle').textContent =
@@ -608,6 +764,8 @@ function applyData(d) {
   $('f-pp').textContent = d.params.proximity_pct;
   fillSelect('sector', 'sector', 'All sectors');
   fillSelect('country', 'country', 'All countries', 'mcap');
+  if (![...$('country').options].some(o => o.value === state.country)) state.country = '';
+  $('country').value = state.country;
   renderCards(); renderTabs(); renderTable();
   if (PENDING_T) { const t = PENDING_T; PENDING_T = null; openDetail(t); }
 }

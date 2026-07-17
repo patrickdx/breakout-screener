@@ -10,7 +10,7 @@ files the static GitHub Pages site actually fetches.
 Tables
   history   dated log of every run; feeds the streak columns
   prices    daily close log for the forward-return cohort + benchmarks
-  ceilings  per-ticker 52-week highs from the last two runs; feeds the
+  ceilings  per-ticker 3-month highs from the last two runs; feeds the
             prior-ceiling comparison (two generations so a same-day re-run
             never sees its own ceilings)
 
@@ -100,7 +100,7 @@ def save_prices(con: sqlite3.Connection, prices: pd.DataFrame) -> None:
 # --- ceilings --------------------------------------------------------------------
 
 def load_prior_ceilings(con: sqlite3.Connection, run_date: str) -> dict[str, float]:
-    """{ticker: 52-week high} as of the run before this one.
+    """{ticker: 3-month high} as of the run before this one.
 
     The table keeps two generations (run dates). On a normal day the newest
     stored generation is yesterday's — use it. On a same-day re-run, rows

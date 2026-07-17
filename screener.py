@@ -1,7 +1,7 @@
 """Global 3-month-high breakout screener.
 
 One TradingView scanner query pulls every primary-listed common stock above
-MIN_MARKET_CAP across ~45 markets trading within UNIVERSE_PCT of its 3-month
+MIN_MARKET_CAP across 46 markets trading within UNIVERSE_PCT of its 3-month
 high, pre-enriched with sector, industry, market cap (USD), country, currency
 and logo. No per-ticker downloads, no API key.
 
@@ -64,6 +64,7 @@ HISTORY_MAX_RUNS = 500    # prune history beyond this many run dates
 ARCHIVE_MAX_RUNS = 120    # per-run JSON archives kept in docs/runs/
 TREND_RUNS = 90           # runs shown in the dashboard trend chart
 TRAIL_RUNS = 40           # per-ticker appearance trail for the detail panel
+ROLLING_RUNS = 63         # ~3 months of runs for the repeat-breakout count
 
 # --- forward-return tracking ---------------------------------------------------
 # Every ticker that fired a Breakout within the last COHORT_RUNS runs keeps
@@ -191,13 +192,17 @@ def classify(df: pd.DataFrame, run_date: str,
 
 def compute_streaks(history: pd.DataFrame, today: pd.DataFrame,
                     run_date: str) -> pd.DataFrame:
-    """Add streak / days_near / streak_start / near_start columns from history.
+    """Add streak / days_near / streak_start / near_start / hits_3m from history.
 
     streak       distinct sessions on the Breakouts list over trailing
                  consecutive runs, incl. today (0 for Near rows)
     days_near    same, but for appearing on either list
     streak_start run date the current breakout streak began ('' for Near rows)
     near_start   run date the current on-screen streak began (all rows)
+    hits_3m      distinct sessions classified Breakout within the trailing
+                 ROLLING_RUNS runs incl. today — unlike streak it does NOT
+                 reset on a day off the list, so it counts a stock repeatedly
+                 blowing out its high in bursts
     """
     prior = history[history['run_date'] != run_date]  # idempotent re-runs
     run_dates = sorted(prior['run_date'].unique())
@@ -221,23 +226,32 @@ def compute_streaks(history: pd.DataFrame, today: pd.DataFrame,
                 break
         return runs, sessions
 
-    streaks, days_near, starts, near_starts = [], [], [], []
+    window = set(run_dates[-(ROLLING_RUNS - 1):])   # + today = ROLLING_RUNS
+    in_win = prior[(prior['list'] == 'Breakout')
+                   & prior['run_date'].isin(window)]
+    hit_sessions = in_win.groupby('ticker')['session_date'].agg(set).to_dict()
+
+    streaks, days_near, starts, near_starts, hits = [], [], [], [], []
     for t, sess, lst in zip(today['ticker'], today['session_date'], today['list']):
         runs_on, sess_on = trailing('onscreen', t)
         days_near.append(len(sess_on | {sess}))
         near_starts.append(runs_on[-1] if runs_on else run_date)
+        past_hits = hit_sessions.get(t, set())
         if lst == 'Breakout':
             runs_b, sess_b = trailing('breakout', t)
             streaks.append(len(sess_b | {sess}))
             starts.append(runs_b[-1] if runs_b else run_date)
+            hits.append(len(past_hits | {sess}))
         else:
             streaks.append(0)
             starts.append('')
+            hits.append(len(past_hits))
     today = today.copy()
     today['streak'] = streaks
     today['days_near'] = days_near
     today['streak_start'] = starts
     today['near_start'] = near_starts
+    today['hits_3m'] = hits
     return today
 
 
@@ -255,22 +269,35 @@ def update_history(history: pd.DataFrame, today: pd.DataFrame,
     return hist.sort_values(['run_date', 'list', 'ticker'], ignore_index=True)
 
 
-def build_trails(history: pd.DataFrame, today: pd.DataFrame) -> dict:
+def build_trails(history: pd.DataFrame, today: pd.DataFrame,
+                 prices: pd.DataFrame) -> dict:
     """Per-ticker appearance trail for the dashboard's detail panel.
 
-    {ticker: [[run_date, "B"|"N", dist_pct, rel_volume], ...]} — the last
-    TRAIL_RUNS rows for every ticker on today's screen, oldest first.
+    {ticker: [[run_date, "B"|"N"|"", dist_pct, rel_volume, price], ...]} —
+    the last TRAIL_RUNS rows for every ticker on today's screen, oldest
+    first. Flag "" marks a run the ticker was off screen but its close was
+    still in the price log (past-breakout cohort), so the detail panel's
+    price chart stays continuous across gaps.
     """
-    h = history[history['ticker'].isin(set(today['ticker']))]
+    tickers = set(today['ticker'])
+    h = history[history['ticker'].isin(tickers)]
+    p = prices[prices['ticker'].isin(tickers)]
+    log = {t: dict(zip(g['run_date'], g['close']))
+           for t, g in p.groupby('ticker')}
     trails: dict[str, list] = {}
     for t, g in h.sort_values('run_date').groupby('ticker'):
-        g = g.tail(TRAIL_RUNS)
-        trails[t] = [
+        rows = [
             [r.run_date, 'B' if r.list == 'Breakout' else 'N',
              None if pd.isna(r.dist_pct) else float(r.dist_pct),
-             None if pd.isna(r.rel_volume) else float(r.rel_volume)]
+             None if pd.isna(r.rel_volume) else float(r.rel_volume),
+             None if pd.isna(r.price) else float(r.price)]
             for r in g.itertuples()
         ]
+        seen = set(g['run_date'])
+        rows += [[d, '', None, None, float(c)]
+                 for d, c in log.get(t, {}).items()
+                 if d not in seen and pd.notna(c)]
+        trails[t] = sorted(rows)[-TRAIL_RUNS:]
     return trails
 
 
@@ -478,9 +505,9 @@ def build_trend(history: pd.DataFrame) -> list[dict]:
 def build_payload(today: pd.DataFrame, trend: list[dict], run_date: str,
                   generated: str, backfilled: bool = False) -> dict:
     breakouts = today[today['list'] == 'Breakout'].sort_values(
-        ['days_near', 'dist_pct'], ascending=[False, True])
+        ['hits_3m', 'days_near', 'dist_pct'], ascending=[False, False, True])
     near = today[today['list'] == 'Near'].sort_values(
-        ['days_near', 'dist_pct'], ascending=[False, True])
+        ['hits_3m', 'days_near', 'dist_pct'], ascending=[False, False, True])
 
     def records(df: pd.DataFrame) -> list[dict]:
         cols = [c for c in df.columns if c != 'list']
@@ -555,7 +582,7 @@ def main() -> int:
                             now.strftime('%Y-%m-%d %H:%M UTC'))
     write_latest(payload)
     write_archive(payload)
-    TRAILS_PATH.write_text(json.dumps(build_trails(history, today),
+    TRAILS_PATH.write_text(json.dumps(build_trails(history, today, prices),
                                       separators=(',', ':')))
     PERFORMANCE_PATH.write_text(json.dumps(perf, separators=(',', ':')))
     con.close()
