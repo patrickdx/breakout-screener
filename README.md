@@ -53,8 +53,8 @@ run log, including price-log closes for runs the stock was off screen). It
 renders with [Lightweight Charts](https://github.com/tradingview/lightweight-charts)
 (TradingView's open-source canvas library, lazy-loaded from a pinned CDN
 build) and falls back to a dependency-free inline SVG if the CDN is blocked.
-Below it: TradingView's embedded price chart, company profile and technicals
-gauge.
+Below it: TradingView's embedded price chart with the breakout-days table
+under it, company profile, technicals gauge, and symbol news feed.
 Panels are deep-linkable (`?t=NASDAQ:AAPL`); the ↗ column jumps straight to
 TradingView. The country filter defaults to United States — pick "All
 countries" for the global view.
@@ -121,7 +121,8 @@ group (all breakouts, first-day signals, continuation days, and the old
 state rule as a comparison — both definitions live side by side). Every
 signal is accounted for: measured, pending, missing (delisted — reported,
 never dropped), invalid (±40% one-day move = probable split), or
-pre-tracking. The dashboard renders the table once numbers exist.
+pre-tracking. The stats live in `docs/performance.json` (the dashboard no
+longer renders them — query the file or the db directly when you want them).
 
 ## Notes on the data
 
